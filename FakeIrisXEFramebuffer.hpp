@@ -59,13 +59,14 @@ void stop(IOService* provider) override;
     void notifyServer(IOSelect event);
     virtual void startIOFB();
     
+    /*
     enum {
         kPowerStateOff = 0,
         kPowerStateOn = 1
     };
-
-    static IOPMPowerState powerStates[2];
-    
+  
+     static IOPMPowerState powerStates[2];
+  */
     
     
     virtual IOService *probe(IOService *provider, SInt32 *score) override;
@@ -116,8 +117,11 @@ void stop(IOService* provider) override;
     virtual IOReturn setAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t value) override;
     
     virtual IOReturn flushDisplay(void) ;
-        virtual void deliverFramebufferNotification(IOIndex index, UInt32 event, void* info) ;
-        virtual IOReturn setNumberOfDisplays(UInt32 count) ;
+    
+    virtual void deliverFramebufferNotification(IOIndex index, UInt32 event, void* info);
+
+    
+    virtual IOReturn setNumberOfDisplays(UInt32 count) ;
     
     
     
@@ -164,17 +168,10 @@ void stop(IOService* provider) override;
     
     virtual IOReturn notifyServer(IOSelect message, void* data, size_t dataSize);
     
-   virtual IOReturn getVRAMRange(IOPhysicalAddress* start,
-                                                 IOPhysicalLength* length);
-        
     virtual  IOReturn getGammaTable(UInt32 channelCount,
                                                   UInt32* dataCount,
                                                   UInt32* dataWidth,
                                                          void** data);
-    
-   virtual IOReturn getFramebufferMemory(void* memory) {
-        return kIOReturnUnsupported;
-    }
 
     virtual IOReturn setMode(IODisplayModeID displayMode, IOOptionBits options, UInt32 depth);
 
@@ -187,11 +184,6 @@ void stop(IOService* provider) override;
     
     void vsyncOccurred(OSObject* owner, IOInterruptEventSource* src, int count);
  
-    virtual IOReturn newUserClient(task_t owningTask,
-                                                   void* securityID,
-                                                   UInt32 type,
-                                                  IOUserClient** handler)override;
-    
     
     
     
