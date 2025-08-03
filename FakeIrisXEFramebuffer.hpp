@@ -36,6 +36,29 @@ private:
         IOLock* timerLock;
     
    
+private:
+    // Cursor state
+    SInt32 cursorX, cursorY;
+    bool cursorVisible;
+    
+    // Color management
+    IOColorEntry* clutTable;
+    void* gammaTable;
+    size_t gammaTableSize;
+    
+    // Interrupt handling
+    struct InterruptInfo {
+        IOSelect type;
+        IOFBInterruptProc proc;
+        void* ref;
+    };
+    OSArray* interruptList;
+    
+    void activatePowerAndController();
+    
+    void initPowerManagement();
+
+    
 protected:
  
     IOMemoryMap* vramMap;
@@ -88,6 +111,8 @@ protected:
  public:
     
     
+    
+    
     bool start(IOService* provider) override;
     void stop(IOService* provider) override;
     virtual bool           init(OSDictionary* dict) override;
@@ -121,6 +146,8 @@ protected:
     
     virtual IOService *probe(IOService *provider, SInt32 *score) override;
 
+    
+    bool getIsUsable() const;
     
     
     virtual IOReturn setPowerState(unsigned long powerStateOrdinal, IOService* whatDevice) override;
@@ -217,6 +244,7 @@ protected:
     
     virtual IOReturn setOnline(bool online);
     
+    virtual IOReturn getConnectionFlags(IOIndex connectIndex, UInt32* flags);
     
     virtual IOReturn notifyServer(IOSelect message, void* data, size_t dataSize);
     
