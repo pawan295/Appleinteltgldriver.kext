@@ -76,6 +76,14 @@ private:
     
 protected:
  
+    IOPhysicalAddress bar0Phys = 0;
+
+    
+    
+    IOMemoryMap* bar0Map;
+
+    
+    
     IOMemoryMap* vramMap;
     IOMemoryMap* mmioMap;
     IOBufferMemoryDescriptor* vramMemory;
@@ -84,6 +92,7 @@ protected:
         IODisplayModeID currentMode;
         IOIndex currentDepth;
         size_t vramSize;
+    
     IOMemoryDescriptor* framebufferSurface;
 
     IOBufferMemoryDescriptor* cursorMemory;
@@ -135,10 +144,10 @@ protected:
     IOCommandGate* commandGate;
 
     void scheduleFlushFromAccelerator(); // called from accelerator
-        IOReturn staticFlushAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
+       static IOReturn staticFlushAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
         
     
-    void mapFramebufferIntoGGTT(IOPhysicalAddress phys, size_t size);
+    bool mapFramebufferIntoGGTT();
 
     
     static constexpr uint32_t H_ACTIVE = 1920;
@@ -157,6 +166,8 @@ protected:
      uint64_t getFramebufferPhysAddr() const {
          return framebufferMemory ? framebufferMemory->getPhysicalAddress() : 0;
      }
+    
+
     
     
 //   uint64_t fFBPhys{0};
@@ -350,11 +361,6 @@ protected:
     void vblankTick(IOTimerEventSource* sender);
 
     
-    
-    
-    void probeHPDandAUX();
-    void probeTranscoders();
-    
  
     void*    getFB() const { return kernelFBPtr; }
     size_t   getFBSize() const { return kernelFBSize; }
@@ -366,20 +372,35 @@ protected:
     
     
     
-    virtual IOReturn newUserClient(task_t owningTask,
-                                   void* securityID,
-                                   UInt32 type,
-                                   IOUserClient** handler) override;
+    IOReturn performFlushNow();
+    static IOReturn staticPerformFlush(OSObject *owner,
+                                       void *arg0, void *arg1,
+                                       void *arg2, void *arg3);
 
+    
+    
+
+    IOReturn newUserClient(task_t owningTask,
+                                                  void* securityID,
+                                                  UInt32 type,
+                                                  OSDictionary* properties,
+                                                  IOUserClient **handler)override;
+    
     bool makeUsable();
+        static IOReturn staticStopAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
+        void performSafeStop(); // actual cleanup executed on workloop/gated thread
+    IOMemoryDescriptor* gttMemoryDescriptor;
+      IOMemoryMap* gttMemoryMap;
+      IOMemoryMap* ggttMemoryMap;
+    uint32_t fbGGTTOffset = 0x00000800;
 
-    
-    
+private:
+   
+    void* gttVa = nullptr;
+     IOVirtualAddress gttVA = 0;
+     volatile uint64_t* ggttMMIO = nullptr;
     
 };
-
-
-
 
 
 
