@@ -24,6 +24,12 @@
 #include <libkern/OSAtomic.h>
 #include <pexpert/i386/boot.h>            // PE_Video
 
+extern "C" {
+    #include <pexpert/pexpert.h>
+    #include <pexpert/device_tree.h>
+    #include <libkern/OSTypes.h>
+}
+
 
 using namespace libkern;
 
@@ -356,7 +362,6 @@ bool FakeIrisXEFramebuffer::initPowerManagement() {
 
 
 
-
 //start
 bool FakeIrisXEFramebuffer::start(IOService* provider) {
     IOLog("FakeIrisXEFramebuffer::start() - Entered\n");
@@ -366,6 +371,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
         return false;
     }
 
+    
 
     /*
     // Improved ACPI device discovery with proper IOACPIPlatformDevice handling
@@ -517,7 +523,8 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
         IOLog("❌ Provider is not IOPCIDevice\n");
         return false;
     }
-    pciDevice->retain();
+
+    //    pciDevice->retain();
 
     
     
@@ -555,6 +562,18 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
         return false;
     }
+    
+    
+    
+    // --- Store physical BAR0 base address ---
+    uint32_t bar0Low  = pciDevice->configRead32(kIOPCIConfigBaseAddress0) & ~0xF;
+    uint32_t bar0High = pciDevice->configRead32(kIOPCIConfigBaseAddress0 + 4);
+
+    bar0Phys = ((uint64_t)bar0High << 32) | bar0Low;
+
+    IOLog("📌 BAR0 physical address = 0x%llX\n", (unsigned long long)bar0Phys);
+
+    
     
     
     // 3️⃣ Enable PCI Memory and IO
@@ -683,6 +702,13 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
     
     
+    
+    bar0Map = pciDevice->mapDeviceMemoryWithIndex(0);
+    mmioBase = (volatile uint8_t*) bar0Map->getVirtualAddress();
+    
+    
+    
+    
 /*
     // === GPU Acceleration Properties ===
     {
@@ -698,13 +724,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
                    IOLog("GPU Acceleration Properties used\n"); // Added newline for cleaner log
                }
     }
-
   */
-    
-    
-    
-    
-   
 
     
     //display bounds
@@ -720,99 +740,118 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
-    // allocate framebuffer memory
-    const uint32_t width = 1920;
+    
+    const uint32_t width  = 1920;
     const uint32_t height = 1080;
-    const uint32_t bpp = 4; // 32bpp
-    uint32_t rawSize = width * height * bpp;
-    uint32_t alignedSize = (rawSize + 0xFFFF) & ~0xFFFF; // 64KB alignment
+    const uint32_t bpp    = 4;
 
-    IOLog("🧠 Allocating framebuffer memory: %ux%u = %u bytes (aligned to 0x%X)\n", width, height, rawSize, alignedSize);
+    uint32_t rawSize     = width * height * bpp;
+    uint32_t alignedSize = (rawSize + 0xFFFF) & ~0xFFFF; // 64KB aligned
 
-    // Use a physical mask to *force 64KB alignment* and low address range (below 4GB)
-    //new
-    int retries = 5;
+    IOLog("🧠 Allocating framebuffer memory: %ux%u = %u bytes (aligned to 0x%X)\n",
+          width, height, rawSize, alignedSize);
+
+    int retries = 3;
+
     while (retries-- > 0) {
+
         framebufferMemory = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
             kernel_task,
-            kIOMemoryPhysicallyContiguous | kIODirectionInOut,
+            kIODirectionInOut | kIOMemoryKernelUserShared,
             alignedSize,
-            0xFFFFFFFFFFFF0000ULL  // 64KB alignment mask
+            0x000000003FFFF000ULL   // BELOW 1GB, 4KB aligned, macOS-friendly
         );
 
-        if (!framebufferMemory) {
-            IOLog("❌ Failed to allocate framebuffer descriptor\n");
-            break;
-        }
 
+        if (!framebufferMemory) {
+            IOLog("❌ Failed to allocate framebuffer descriptor (retry %d)\n", retries);
+            continue;
+        }
+        
         if (framebufferMemory->prepare() != kIOReturnSuccess) {
             IOLog("❌ framebufferMemory->prepare() failed\n");
             framebufferMemory->release();
             framebufferMemory = nullptr;
             continue;
         }
+
+        break;
+    }
+
+    
+    
+    IOPhysicalAddress fbPhys = framebufferMemory->getPhysicalAddress();
+
+    if ((fbPhys & 0xFFFF) != 0) {
+        IOLog(" FB not 64KB aligned, but OK — GGTT mapping handles alignment\n");
+    }
+    else
+    { IOLog("64 KB Aligned");
         
-
-        IOPhysicalAddress fbPhys = framebufferMemory->getPhysicalAddress();
-
-        if ((fbPhys & 0xFFFF) == 0) {
-            IOLog("✅ Got 64KB-aligned framebuffer at 0x%llX\n", fbPhys);
-            break;
-        } else {
-            IOLog("❌ Retry: Framebuffer not 64KB aligned (0x%llX)\n", fbPhys);
-            framebufferMemory->release();
-            framebufferMemory = nullptr;
-        }
     }
     
-
-    if (!framebufferMemory) {
-        IOLog("❌ Could not get properly aligned framebuffer after retries\n");
-        return false; // or return kIOReturnNoMemory;
-    }
-
     
-    // Zero the memory (safely)
     void* fbAddr = framebufferMemory->getBytesNoCopy();
     if (fbAddr) bzero(fbAddr, rawSize);
 
-    IOLog("✅ Framebuffer allocated and initialized successfully\n");
-    
-    
-//new
-    IOPhysicalAddress fbPhys = framebufferMemory->getPhysicalAddress();
-    size_t fbLen = static_cast<size_t>(framebufferMemory->getLength());
-    IOLog("📦 Final FB physical address: 0x%08llX\n", fbPhys);
-    IOLog("📏 Final FB length: 0x%08X\n", fbLen=framebufferMemory->getLength());
-    
+    //IOPhysicalAddress fbPhys = framebufferMemory->getPhysicalAddress();
+    size_t fbLen = framebufferMemory->getLength();
 
     this->kernelFBPtr  = fbAddr;
     this->kernelFBSize = fbLen;
     this->kernelFBPhys = fbPhys;
-    
-    
-  
-    // unnecessary unless you're actually creating a IOSurface/IOAccel surface for GL/Metal.
-   
-    if (framebufferMemory) {
-        framebufferSurface = IOMemoryDescriptor::withAddressRange(
-            fbPhys,
-            framebufferMemory->getLength(),
-            kIODirectionInOut,
-            kernel_task
-        );
 
-        if (framebufferSurface) {
-            IOLog("✅ Framebuffer surface registered\n");
-        } else {
-            IOLog("❌ Failed to create framebuffer surface\n");
-        }
+    IOLog("📦 Final FB physical address: 0x%08llX\n", fbPhys);
+    IOLog("📏 Final FB length: 0x%08zX\n", fbLen);
+
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    // Optional surface descriptor (for later IOSurface/Metal integration)
+    framebufferSurface = IOMemoryDescriptor::withAddressRange(
+        fbPhys,
+        fbLen,
+        kIODirectionInOut,
+        kernel_task
+    );
+
+    if (framebufferSurface) {
+        IOLog("✅ Framebuffer surface registered\n");
+    } else {
+        IOLog("❌ Failed to create framebuffer surface\n");
     }
 
-        
     
     
+    
+    if (kernelFBPtr) {
+        uint32_t *px = (uint32_t *)kernelFBPtr;
+        size_t pixels = (1920 * 1080);
+        for (size_t i = 0; i < pixels; i++) {
+            px[i] = 0xFF0000FF; // ARGB = solid red (A=255, R=0, G=0, B=255)
+        }
+        IOLog("🟥 Filled framebuffer with test color\n");
+    }
 
+    
+    
+    
+    
     // Create work loop and command gate
     workLoop = IOWorkLoop::workLoop();
     if (!workLoop) {
@@ -966,14 +1005,12 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     setProperty("IOFBSystemPowerProfile", OSString::withCString("Full"));
 
     setProperty("IOAccelRevision", 2, 32);
-    setProperty("IOAccelVRAMSize", 128 * 1024 * 1024, 128);
-    setProperty("IOFBNeedsRefresh", kOSBooleanFalse);
+    setProperty("IOAccelVRAMSize", framebufferMemory->getLength(), 64);    setProperty("IOFBNeedsRefresh", kOSBooleanFalse);
     setProperty("IOFBHostAccessFlags", (uintptr_t)0x1); // host write allowed
 
-    setProperty("IOFBUserClientClass", "IOFramebufferUserClient");
-    
+    setProperty("IOFBUserClientClass", OSSymbol::withCString("IOFramebufferUserClient"));
+
     setProperty("IOFBSharedUserClient", kOSBooleanTrue);
-    setProperty("IOUserClientClass", "IOFramebufferUserClient");
     setProperty("IOFramebufferSharedUserClient", kOSBooleanTrue);
 
     
@@ -1001,7 +1038,6 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
     
     setProperty("IOFBAccelerator", kOSBooleanTrue);
-    setProperty("IOFBDependentID", this); // self pointer (important)
     setProperty("IOFBDependentIndex",OSNumber::withNumber((UInt64)0, 32));
     setProperty("IOFBCursorInfo", OSNumber::withNumber((UInt64)0, 32));
     setProperty("IOFBTransform", OSNumber::withNumber((UInt64)0, 32));
@@ -1036,7 +1072,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
       */
     
     
-    getProvider()->setProperty("VRAM,totalsize", framebufferMemory->getLength(), 32);
+    getProvider()->setProperty("VRAM,totalsize", framebufferMemory->getLength(), 64);
     
     setProperty("IOFBConnectFlags", kIOConnectionBuiltIn, 32);
     setProperty("IOFBCurrentConnection", OSNumber::withNumber((UInt64)0, 32));
@@ -1048,8 +1084,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     setProperty(kIOConsoleDeviceKey, kOSBooleanTrue);
 
-    setProperty("IOConsoleFramebuffer", this);
-    setProperty("IOFramebufferSharedUserClient", kOSBooleanTrue);
+    setProperty("IOConsoleFramebuffer", kOSBooleanTrue);
 
     
     
@@ -1219,7 +1254,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
 
     setProperty(kIOConsoleFramebufferKey, kOSBooleanTrue);
-    setProperty(kIOFramebufferConsoleKey, this);
+    setProperty(kIOFramebufferConsoleKey, kOSBooleanTrue);
     
     
     
@@ -1266,8 +1301,9 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
      */
-     
-    IOService::getPlatform()->setProperty("IOFramebufferConsoleKey", this);
+
+    
+    IOService::getPlatform()->setProperty("IOFramebufferConsoleKey", kOSBooleanTrue);
     
     
     publishDisplay();
@@ -1289,7 +1325,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
-    
+    /*
     //debug verification
     IOLog("===== CONSOLE STATUS VERIFICATION ====\n");
     IOLog("isConsoleDevice(): %s\n", isConsoleDevice() ? "YES" : "NO");
@@ -1307,26 +1343,6 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
           getProperty("IOConsoleDevice") ? "true" : "false");
     
     
-    // 6. Finally, publish the framebuffer
-    attachToParent(getProvider(), gIOServicePlane);
-    registerService();
-    
-
-    
-    
-    IOLog("(FakeIrisXEFramebuffer) 🔧 Creating FakeIrisXEUserClient manually for test\n");
-    IOUserClient* client = nullptr;
-    IOReturn status = newUserClient(kernel_task, nullptr, 0, &client);
-    if (status == kIOReturnSuccess && client) {
-        IOLog("(FakeIrisXEFramebuffer) ✅ Manually attached FakeIrisXEUserClient\n");
-        client->release(); // Allow normal lifecycle
-    } else {
-        IOLog("(FakeIrisXEFramebuffer) ❌ Failed to manually create FakeIrisXEUserClient (0x%x)\n", status);
-    }
-
-    
-    
-
     
     IORegistryEntry *wranglerEntry = IORegistryEntry::fromPath("/IOResources/IODisplayWrangler");
     if (wranglerEntry) {
@@ -1338,13 +1354,52 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
             this->attachToParent(wrangler, gIOServicePlane);
 
             // Promote to console framebuffer
-            wrangler->setProperty("IOFramebuffer", this);
-            setProperty("IOFramebufferIsConsole", true);
-            setProperty("IOConsoleDevice", true);
+            wrangler->setProperty("IOFramebuffer", kOSBooleanTrue);
+            setProperty("IOFramebufferIsConsole", kOSBooleanTrue);
+            setProperty("IOConsoleDevice", kOSBooleanTrue);
         }
         wranglerEntry->release();
     }
 
+*/
+    
+    
+    
+    IOLog("---- PCI BAR DUMP ----\n");
+
+    uint32_t count = pciDevice->getDeviceMemoryCount();
+    IOLog("DeviceMemoryCount = %u\n", count);
+
+    for (uint32_t i = 0; i < count; i++) {
+        IODeviceMemory* mem = pciDevice->getDeviceMemoryWithIndex(i);
+        if (!mem) continue;
+
+        IOPhysicalAddress phys = mem->getPhysicalAddress();
+        uint64_t length = mem->getLength();
+
+        IOLog("BAR %u: phys=0x%llX len=0x%llX\n",
+              i,
+              (unsigned long long)phys,
+              (unsigned long long)length);
+    }
+
+    
+
+    
+    
+    IOLog("---- PCI GTTMMADR dump ----\n");
+
+    IOLog("PCI GTTMMADR low = 0x%08X\n", pciDevice->configRead32(0x18));
+    IOLog("PCI GTTMMADR hi  = 0x%08X\n", pciDevice->configRead32(0x1C));
+
+    
+    
+    // 6. Finally, publish the framebuffer
+    attachToParent(getProvider(), gIOServicePlane);
+    
+    
+    registerService();
+    IOLog("register service called");
 
     
     
@@ -1360,64 +1415,133 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
 
 
-void FakeIrisXEFramebuffer::stop(IOService* provider) {
-    IOLog("FakeIrisXEFramebuffer::stop() called\n");
-    
-    
+void FakeIrisXEFramebuffer::stop(IOService* provider)
+{
+    IOLog("FakeIrisXEFramebuffer::stop() called — scheduling gated cleanup\n");
+
+    // Mark we are shutting down so any timers/work will early-exit
     IOLockLock(timerLock);
-    driverActive = false;  // Signal all timers to stop
+    driverActive = false;
+    shuttingDown = true;
     IOLockUnlock(timerLock);
+
     
-    if (commandGate && fWorkLoop) {
-        fWorkLoop->removeEventSource(commandGate);
+    if (commandGate) {
+        // runAction will call staticStopAction() on the gated thread synchronously.
+        commandGate->runAction(&FakeIrisXEFramebuffer::staticStopAction);
+    } else {
+        // fallback: if no gate exists, do best-effort cleanup inline
+        performSafeStop();
+    }
+
+    // Now call superclass stop after gated cleanup.
+    super::stop(provider);
+}
+
+
+
+IOReturn FakeIrisXEFramebuffer::staticStopAction(OSObject *owner,
+                                                 void * /*arg0*/,
+                                                 void * /*arg1*/,
+                                                 void * /*arg2*/,
+                                                 void * /*arg3*/)
+{
+    FakeIrisXEFramebuffer *fb = OSDynamicCast(FakeIrisXEFramebuffer, owner);
+    if (!fb) return kIOReturnBadArgument;
+
+    IOLog("FakeIrisXEFramebuffer::staticStopAction() running on gated thread\n");
+    fb->performSafeStop();
+    return kIOReturnSuccess;
+}
+
+void FakeIrisXEFramebuffer::performSafeStop()
+{
+    IOLog("FakeIrisXEFramebuffer::performSafeStop() — doing gated cleanup\n");
+
+    // Cancel timers and remove event sources under workloop/gate
+    if (vsyncTimer) {
+        vsyncTimer->cancelTimeout();
+        if (workLoop) {
+            workLoop->removeEventSource(vsyncTimer);
+        }
+        vsyncTimer->release();
+        vsyncTimer = nullptr;
+    }
+
+    if (displayInjectTimer) {
+        displayInjectTimer->cancelTimeout();
+        if (workLoop) {
+            workLoop->removeEventSource(displayInjectTimer);
+        }
+        displayInjectTimer->release();
+        displayInjectTimer = nullptr;
+    }
+
+    if (commandGate && workLoop) {
+        // commandGate is still valid here — do not remove it yet because we're running inside it.
+        // We will remove it after clearing other sources (below) from the workloop.
+        // (But do not call workLoop->removeEventSource(commandGate) here; do it after the gated cleanup returns.)
+    }
+
+    // Stop power management (PM) under gated thread
+    PMstop();
+
+    // Release GPU resources and memory descriptors (these touch IOGraphics/IOBuffer objects)
+    OSSafeReleaseNULL(framebufferMemory);
+    OSSafeReleaseNULL(framebufferSurface);
+    OSSafeReleaseNULL(cursorMemory);
+    OSSafeReleaseNULL(mmioMap);
+    OSSafeReleaseNULL(vramMemory);
+
+    // Remove interrupt sources if any
+    if (vsyncSource && workLoop) {
+        workLoop->removeEventSource(vsyncSource);
+        vsyncSource->release();
+        vsyncSource = nullptr;
+    }
+
+    // Now remove and release the commandGate and workLoop safely (still on the workloop/gated thread)
+    if (commandGate && workLoop) {
+        workLoop->removeEventSource(commandGate);
         commandGate->release();
         commandGate = nullptr;
     }
 
-    
-    if (vsyncTimer) {
-           vsyncTimer->cancelTimeout();
-           if (workLoop) {
-               workLoop->removeEventSource(vsyncTimer);
-           }
-           vsyncTimer->release();
-           vsyncTimer = nullptr;
-       }
-       
-       if (displayInjectTimer) {
-           displayInjectTimer->cancelTimeout();
-           if (workLoop) {
-               workLoop->removeEventSource(displayInjectTimer);
-           }
-           displayInjectTimer->release();
-           displayInjectTimer = nullptr;
-       }
-
-       PMstop();
-
-    OSSafeReleaseNULL(framebufferMemory);
-    OSSafeReleaseNULL(mmioMap);
-    OSSafeReleaseNULL(vramMemory);
-    
-    if (fVBlankTimer && fWorkLoop) {
-        fWorkLoop->removeEventSource(fVBlankTimer);
-        fVBlankTimer->release();
-        fVBlankTimer = nullptr;
+    if (workLoop) {
+        workLoop->release();
+        workLoop = nullptr;
     }
 
-    
-    
+    // Free other locks and arrays
+    if (timerLock) {
+        IOLockFree(timerLock);
+        timerLock = nullptr;
+    }
+    if (powerLock) {
+        IOLockFree(powerLock);
+        powerLock = nullptr;
+    }
+
+    if (interruptList) {
+        interruptList->release();
+        interruptList = nullptr;
+    }
+
+    // Close PCI device and release provider only after gated cleanup
     if (pciDevice) {
         pciDevice->close(this);
-        OSSafeReleaseNULL(pciDevice);  // ✅ Consistent with other releases
+        pciDevice->release();
+        pciDevice = nullptr;
     }
 
-    
-    shuttingDown = true;
-    if(vsyncTimer) vsyncTimer->cancelTimeout();
-    
-        super::stop(provider);
+    IOLog("FakeIrisXEFramebuffer::performSafeStop() — gated cleanup complete\n");
 }
+
+
+
+
+
+
 
 
 
@@ -1660,42 +1784,46 @@ void FakeIrisXEFramebuffer::vblankTick(IOTimerEventSource* sender)
 
 
 
-#include "FakeIrisXEUserClient.hpp"
+
 
 IOReturn FakeIrisXEFramebuffer::newUserClient(task_t owningTask,
-                                               void* securityID,
-                                               UInt32 type,
-                                               IOUserClient **handler)
+                                              void* securityID,
+                                              UInt32 type,
+                                              OSDictionary* properties,
+                                              IOUserClient **handler)
 {
-    IOLog("FakeIrisXEFramebuffer::newUserClient() called\n");
+    IOLog("[FakeIrisXEFramebuffer] newUserClient(type=%u)\n", type);
 
-    FakeIrisXEUserClient* client = OSTypeAlloc(FakeIrisXEUserClient);
-    if (!client) {
-        IOLog("FakeIrisXEFramebuffer::newUserClient() failed: allocation failed\n");
-        return kIOReturnNoMemory;
+    //
+    // Call the REAL IOFramebuffer::newUserClient !!!
+    // We do this because WindowServer REQUIRES the real framebuffer UC.
+    //
+
+    IOFramebuffer* fb = OSDynamicCast(IOFramebuffer, this);
+
+    if (!fb) {
+        IOLog("[FakeIrisXEFramebuffer] ERROR: this is not an IOFramebuffer\n");
+        return kIOReturnUnsupported;
     }
 
-    if (!client->initWithTask(owningTask, securityID, type, nullptr)) {
-        IOLog("FakeIrisXEFramebuffer::newUserClient() failed: initWithTask failed\n");
-        client->release();
-        return kIOReturnError;
+    //
+    // Real IOFramebuffer::newUserClient has signature:
+    // IOReturn newUserClient(task_t, void*, UInt32, IOUserClient**)
+    //
+    // So we pass ONLY 4 args, not 5.
+    //
+
+    IOReturn ret = fb->IOFramebuffer::newUserClient(owningTask,
+                                                    securityID,
+                                                    type,
+                                                    handler);
+
+    if (ret != kIOReturnSuccess) {
+        IOLog("[FakeIrisXEFramebuffer] real IOFramebuffer::newUserClient failed (%x)\n", ret);
+        return ret;
     }
 
-    if (!client->attach(this)) {
-        IOLog("FakeIrisXEFramebuffer::newUserClient() failed: attach failed\n");
-        client->release();
-        return kIOReturnError;
-    }
-
-    if (!client->start(this)) {
-        IOLog("FakeIrisXEFramebuffer::newUserClient() failed: start failed\n");
-        client->detach(this);
-        client->release();
-        return kIOReturnError;
-    }
-
-    *handler = client;
-    IOLog("FakeIrisXEFramebuffer::newUserClient() success — UserClient attached!\n");
+    IOLog("[FakeIrisXEFramebuffer] returned REAL IOFramebufferUserClient OK\n");
     return kIOReturnSuccess;
 }
 
@@ -1705,86 +1833,6 @@ IOReturn FakeIrisXEFramebuffer::newUserClient(task_t owningTask,
 
 
 
-
-// Place near top of C++ file (with safeMMIORead/safeMMIOWrite declarations visible)
-#include <IOKit/IOLib.h>
-
-// --- Transcoder probe: print TRANS_x_CONF, TRANS_x_DDI_FUNC, TP_CTL, TP_STATUS for A..E ---
-void FakeIrisXEFramebuffer::probeTranscoders() {
-    struct T { const char* name; uint32_t conf; uint32_t func; uint32_t tpctl; uint32_t tpsta; };
-    T tbl[] = {
-        {"TRANS_A", 0x60000, 0x60010, 0x60040, 0x60044},
-        {"TRANS_B", 0x61000, 0x61010, 0x61040, 0x61044},
-        {"TRANS_C", 0x62000, 0x62010, 0x62040, 0x62044},
-        {"TRANS_D", 0x63000, 0x63010, 0x63040, 0x63044},
-        {"TRANS_E", 0x6F000, 0x6F010, 0x6F040, 0x6F044}
-    };
-
-    IOLog("🔎 Transcoder probe start\n");
-    for (auto &t : tbl) {
-        uint32_t conf = safeMMIORead(t.conf);
-        uint32_t func = safeMMIORead(t.func);
-        uint32_t tpctl = safeMMIORead(t.tpctl);
-        uint32_t tpsta = safeMMIORead(t.tpsta);
-        IOLog("  %s: CONF=0x%08X FUNC=0x%08X TP_CTL=0x%08X TP_STA=0x%08X\n",
-              t.name, conf, func, tpctl, tpsta);
-    }
-    IOLog("🔎 Transcoder probe end\n");
-}
-
-// --- HPD + AUX quick dump for ports A/B/C ---
-// prints HPD interrupt/sticky/ctl and AUX channel CTL/STATUS for A/B/C
-void FakeIrisXEFramebuffer::probeHPDandAUX() {
-    IOLog("🔎 HPD/AUX probe start\n");
-
-    // Example HPD registers (adjust if your platform differs)
-    const uint32_t SDEISR = 0xC4000;   // SDE interrupt sticky
-    const uint32_t SDEIIR = 0xC4008;   // SDE interrupt raw
-    const uint32_t SDEIER = 0xC400C;   // SDE interrupt enable
-    const uint32_t HPD_CTL = 0xC4030;  // HPD control bits per port (example)
-    uint32_t v1 = safeMMIORead(SDEISR);
-    uint32_t v2 = safeMMIORead(SDEIIR);
-    uint32_t v3 = safeMMIORead(SDEIER);
-    uint32_t v4 = safeMMIORead(HPD_CTL);
-    IOLog("  HPD: SDEISR=0x%08X SDEIIR=0x%08X SDEIER=0x%08X HPD_CTL=0x%08X\n", v1, v2, v3, v4);
-
-    // AUX channel bases (A/B/C). If your platform uses different addresses, change them.
-    const uint32_t AUX_BASES[] = { 0x64000, 0x65000, 0x66000 };
-    const char* AUX_NAMES[] = { "A", "B", "C" };
-
-    for (int i = 0; i < 3; ++i) {
-        uint32_t base = AUX_BASES[i];
-        // common AUX registers offsets (example): +0x10 CTL, +0x14 STATUS, +0x18 RDATA, +0x1C WDATA
-        uint32_t ctl  = safeMMIORead(base + 0x10);
-        uint32_t sta  = safeMMIORead(base + 0x14);
-        uint32_t rhea = safeMMIORead(base + 0x18); // read/e.g. aux-related read header/status
-        uint32_t whea = safeMMIORead(base + 0x1C); // write header
-        IOLog("  AUX %s (0x%05X): CTL=0x%08X STA=0x%08X RHD=0x%08X WHD=0x%08X\n",
-              AUX_NAMES[i], base, ctl, sta, rhea, whea);
-    }
-
-    // Optional: clear sticky HPD bits (UNCOMMENT if you want to clear sticky after checking)
-    // safeMMIOWrite(SDEISR, v1); // write-back sticky to clear
-    IOLog("🔎 HPD/AUX probe end\n");
-}
-
-
-
- 
- 
-#include <IOKit/IOLib.h>
-#include <IOKit/IOService.h>
-
-// Use the ACTUAL timings from your working system
-static constexpr uint32_t H_ACTIVE = 1920;
-static constexpr uint32_t H_TOTAL  = 2212;  // From TRANS_HTOTAL_A
-static constexpr uint32_t H_SYNC_START = 1968;  // From TRANS_HSYNC_A
-static constexpr uint32_t H_SYNC_END = 2000;
-
-static constexpr uint32_t V_ACTIVE = 1080;
-static constexpr uint32_t V_TOTAL  = 1140;  // From TRANS_VTOTAL_A
-static constexpr uint32_t V_SYNC_START = 1083;  // From TRANS_VSYNC_A
-static constexpr uint32_t V_SYNC_END = 1089;
 
 // Tiger Lake register addresses (verified from your system)
 #define TRANS_CONF_A        0x70008
@@ -1827,12 +1875,6 @@ static constexpr uint32_t V_SYNC_END = 1089;
 
 
 
-static inline uint32_t PACK_TIMING(uint32_t start, uint32_t end) {
-    return ((end - 1) << 16) | start;
-}
-
-
-
 
 
 IOReturn FakeIrisXEFramebuffer::enableController() {
@@ -1855,8 +1897,6 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
 
     const uint32_t width  = H_ACTIVE;   // 1920
     const uint32_t height = V_ACTIVE;   // 1080
-    
-      
     const IOPhysicalAddress phys = framebufferMemory->getPhysicalAddress();
 
     IOLog("DEBUG[V38]: reading initial state…\n");
@@ -1867,32 +1907,6 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     IOLog("  PIPECONF_A (before):      0x%08X\n", rd(PIPECONF_A));
     LOG_FLUSH(("DEBUG[V38]: …state read complete.\n"));
 
-  
-/*
-    // --- Map framebuffer into GGTT ---
-    LOG_FLUSH(("🧩 [GGTT] Mapping framebuffer into GGTT at 0x00100000…\n"));
-    const uint32_t gttOffset = 0x006000000;
-
-     if (rd(PLANE_SURF_1_A) == 0) {
-         // Plane surface register unset → need to map manually
-         mapFramebufferIntoGGTT(0x00200000, framebufferMemory->getLength());
-         wr(PLANE_SURF_1_A, 0x00200000);
-         IOLog("✅ Manual GGTT mapping performed at 0x00200000\n");
-     } else {
-         IOLog("🟢 Skipping GGTT mapping; BIOS already configured valid surface\n");
-     }
-
-         
-#define ggttReadPTE
-    // Verify first/last PTEs point to your FB’s physical pages
-    uint32_t firstPTE = ggttReadPTE(gttOffset);        // should end with | 0x7
-    uint32_t lastPTE  = ggttReadPTE(gttOffset + framebufferMemory->getLength() - 4096);
-    IOLog("[GGTT] PTE[0]=0x%08X  PTE[last]=0x%08X\n", firstPTE, lastPTE);
-*/
-    
-    
-    
-    
     // --- 1) Program visible pipe source ---
     wr(PIPE_SRC_A, ((width - 1) << 16) | (height - 1));
     IOLog("✅ PIPE_SRC_A set to %ux%u (reg=0x%08X)\n", width, height, rd(PIPE_SRC_A));
@@ -1903,49 +1917,95 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     IOLog("✅ PLANE_POS_1_A=0x%08X, PLANE_SIZE_1_A=0x%08X\n",
           rd(PLANE_POS_1_A), rd(PLANE_SIZE_1_A));
 
-
-  /*
-    // --- 3) Program plane surface/stride ---
-    wr(PLANE_SURF_1_A, gttOffset);
-    rd(PLANE_SURF_1_A);  // Serialize
-    wr(PLANE_SURF_1_A, gttOffset);  // Latch update
-    IOSleep(5);
-    IOLog("✅ Using GGTT offset 0x%08X for PLANE_SURF_1_A\n", gttOffset);
-
-    //force address latch
-    wr(0x70048, 0xFFFFFFFF);
-*/
-    
+   
     
     
 
-    //ddb entry for pipe a plane 1
+    
+    
+    
+    // --------- MAP FB INTO GGTT -----------
+
+    if (!mapFramebufferIntoGGTT()) {
+         IOLog("❌ GGTT mapping failed\n");
+         return kIOReturnError;
+     }
+
+     // --------- PROGRAM PLANE SURFACE ---------
+     wr(PLANE_SURF_1_A, fbGGTTOffset);
+     IOLog("PLANE_SURF_1_A = 0x%08X\n", rd(PLANE_SURF_1_A));
+   
+    
+    
+
+    
+    
+    
+    
+    // ddb entry for pipe a plane 1
     const uint32_t PLANE_BUF_CFG_1_A = 0x70140;
     wr(PLANE_BUF_CFG_1_A, (0x07FFu << 16) | 0x000u);
     IOLog("DDB buffer assigned (PLANE_BUF_CFG_1_A=0x%08X)\n", rd(PLANE_BUF_CFG_1_A));
 
-  
+    
+    
+    // === TIGER LAKE WATERMARK / FIFO FIX (THIS KILLS THE FLICKERING LINES) ===
+    wr(0xC4060, 0x00003FFF);   // WM_LINETIME_A  – increase line time watermark
+    wr(0xC4064, 0x00000010);   // WM0_PIPE_A     – conservative level 0
+    wr(0xC4068, 0x00000020);   // WM1_PIPE_A     – level 1
+    wr(0xC406C, 0x00000040);   // WM2_PIPE_A     – level 2
+    wr(0xC4070, 0x00000080);   // WM3_PIPE_A     – level 3
+
+    // Force maximum priority for primary plane
+    wr(0xC4020, 0x0000000F);   // ARB_CTL – give plane highest priority
+
+    IOLog("Tiger Lake FIFO/watermark fix applied \n");
+    
     
     
     // --- Program stride (in 64-byte blocks) ---
     const uint32_t strideBytes  = 7680;
     const uint32_t strideBlocks = strideBytes / 64;  // Each unit = 64 bytes
-
     wr(PLANE_STRIDE_1_A, strideBlocks);
     IOSleep(1);
     uint32_t readBack = rd(PLANE_STRIDE_1_A);
     IOLog("✅ PLANE_STRIDE_1_A programmed: %u blocks (64B each), readback=0x%08X\n", strideBlocks, readBack);
     IOLog("👉 Effective byte stride = %u bytes\n", readBack * 64);
 
-    
-    
-    
-    // Plane control: 32bpp XRGB, linear, no enable yet
-    uint32_t planeCtl = 0x02009000;  // No enable bit
-    planeCtl &= ~((1u<<27) | (3u<<10));  // Clear tiling
-    wr(PLANE_CTL_1_A, planeCtl);
-    IOLog("✅ PLANE_CTL_1_A (linear, no-enable)=0x%08X\n", rd(PLANE_CTL_1_A));
 
+     
+     
+    uint32_t planeCtl = rd(PLANE_CTL_1_A);
+
+    // enable plane
+    planeCtl |= (1u << 31);
+
+    // pixel format ARGB8888 = 0x06 << 24
+    planeCtl &= ~(7u << 24);
+    planeCtl |= (6u << 24);
+
+    // disable all tiling modes
+    planeCtl &= ~(3u << 10);   // bits 11:10 = 00 = linear
+
+    // disable rotation
+    planeCtl &= ~(3u << 14);
+
+    // write back
+    wr(PLANE_CTL_1_A, planeCtl);
+
+    IOLog("PLANE_CTL_1_A (linear/ARGB8888) = 0x%08X\n", rd(PLANE_CTL_1_A));
+
+    
+    
+    
+    // Disable cursor plane (CURSOR_CTL_A = 0x70080)
+    wr(0x70080, 0x00000000);  // CURSOR_CTL = disabled
+    wr(0x70084, 0x00000000);  // CURBASE = null
+    wr(0x7008C, 0x00000000);   // CUR_POS_A  = 0,0
+    IOLog("Cursor plane disabled (0x%08X)\n", rd(0x70080));
+    
+    
+    
     // --- Program Pipe A timings for 1920x1080@60 ---
     const uint32_t HTOTAL_A = 0x60000;
     const uint32_t HBLANK_A = 0x60004;
@@ -2019,20 +2079,6 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     IOSleep(5);
     IOLog("✅ DDI_BUF_CTL_A now=0x%08X\n", rd(DDI_BUF_CTL_A));
 
-    
-    //force the tiling bits clear
-    uint32_t ctl = rd(PLANE_CTL_1_A);
-    ctl &= ~(3u << 10);   // Clear bits 11:10 — tile mode = linear
-    ctl &= ~(1u << 14);   // Clear bit 14 — surface rotation
-    wr(PLANE_CTL_1_A, ctl);
-    IOLog("✅ Forced PLANE_CTL_1_A linear, rotation off: 0x%08X\n", ctl);
-    
-    // --- Enable the plane ---
-    const uint32_t PLANE_CTL_BASE_32BPP = 0x82001000;
-    wr(PLANE_CTL_1_A, PLANE_CTL_BASE_32BPP & ~0x80000000u);
-    wr(PLANE_CTL_1_A, rd(PLANE_CTL_1_A) | 0x80000000u);
-    IOSleep(5);
-    IOLog("✅ PLANE_CTL_1_A (enabled)=0x%08X\n", rd(PLANE_CTL_1_A));
 
     // --- Power up eDP Panel ---
     const uint32_t PP_CONTROL = 0x00064004;
@@ -2048,6 +2094,8 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
         IOSleep(10);
     }
 
+    
+    
     // --- Enable backlight ---
     const uint32_t BXT_BLC_PWM_FREQ1 = 0x000C8250;
     const uint32_t BXT_BLC_PWM_DUTY1 = 0x000C8254;
@@ -2057,6 +2105,8 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     IOLog("✅ Backlight PWM enabled (50%% duty)\n");
     IOSleep(10);
 
+    
+   
     // --- Test pattern ---
     IOLog("DEBUG: Painting solid red pattern…\n");
     if (auto* fb = (uint32_t*)framebufferMemory->getBytesNoCopy()) {
@@ -2065,7 +2115,7 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
         for (uint32_t i = 0; i < pixels; ++i) {
             fb[i] = 0x00FF0000; // XRGB: Red
         }
-        
+
         // Add white border for verification
         for (uint32_t x = 0; x < width; x++) {
             fb[x] = 0x00FFFFFF;  // Top
@@ -2076,6 +2126,10 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
             fb[y * width + (width-1)] = 0x00FFFFFF;  // Right
         }
     }
+
+    
+    
+    
     
     IOLog("DEBUG: Flushing display…\n");
     flushDisplay();
@@ -2091,50 +2145,10 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     IOLog("  PIPECONF_A          = 0x%08X\n", rd(PIPECONF_A));
     IOLog("  TRANS_CONF_A        = 0x%08X\n", rd(TRANS_CONF_A));
     IOLog("  DDI_BUF_CTL_A       = 0x%08X\n", rd(DDI_BUF_CTL_A));
-    
-    // Final verification
 
- 
-    /*
-    // === GGTT Offset Diagnostic ===
-    uint32_t activeSurf = rd(PLANE_SURF_1_A);
-    IOLog("🔍 [GGTT-DIAG] Current PLANE_SURF_1_A = 0x%08X\n", activeSurf);
-
-    // Get your framebuffer base physical address
-    uint64_t fbPhys = fbPhysAddr; // use whatever variable you store this in
-    IOLog("🔍 [GGTT-DIAG] Framebuffer physical base = 0x%08llX\n", fbPhys);
-
-    // Compare and decide if they match (within 1MB margin)
-    uint64_t diff = (activeSurf > fbPhys)
-        ? (activeSurf - fbPhys)
-        : (fbPhys - activeSurf);
-
-    if (activeSurf == 0) {
-        IOLog("⚠️ [GGTT-DIAG] Plane surface register is 0x0 — GPU may be using legacy BIOS GGTT binding.\n");
-    } else if (diff < 0x100000) {
-        IOLog("✅ [GGTT-DIAG] GPU scanout appears to match our framebuffer region! (Δ=%llu bytes)\n", diff);
-    } else {
-        IOLog("❌ [GGTT-DIAG] GPU is scanning a *different* GGTT-mapped surface (Δ=%llu bytes)\n", diff);
-        IOLog("   Likely WindowServer or BIOS framebuffer still active.\n");
-    }
-
-    // Optional: peek at first GGTT entry (0x48000 base for GTT)
-    uint32_t ggttEntry0 = rd(0x48000);
-    IOLog("🧠 [GGTT-DIAG] GGTT[0] entry = 0x%08X (first PTE)\n", ggttEntry0);
-*/
-    
-    
-    
     IOLog("✅✅✅ enableController(V38) complete.\n");
-
     return kIOReturnSuccess;
 }
-
-
-
-
-
-
 
 
 
@@ -2159,7 +2173,7 @@ IOReturn FakeIrisXEFramebuffer::flushFramebuffer(void) {
   bcopy((const void*)src, (void*)dst, pitch * lines);
 
   // plane surface “touch” is optional since we’re not changing SURF; do a readback fence:
-  (void) safeMMIORead(PLANE_CTL_1_A);
+//  (void) safeMMIORead(PLANE_CTL_1_A);
 
   return kIOReturnSuccess;
 }
@@ -2167,16 +2181,16 @@ IOReturn FakeIrisXEFramebuffer::flushFramebuffer(void) {
 
 
 void FakeIrisXEFramebuffer::waitVBlank() {
-  // Tiger Lake PIPE_STATUS_A @ 0x70024 – bit 1: VBLANK_INT?
-  // We don’t use interrupts yet; do a crude scanline wrap wait.
-  const uint32_t PIPE_DSL_A = 0x60000 + 0x1A0; // Display Scan Line (per PRM)
-  uint32_t last = safeMMIORead(PIPE_DSL_A);
-  // wait for wrap (falling or rising)
-  for (int i = 0; i < 200000; ++i) {
-    uint32_t now = safeMMIORead(PIPE_DSL_A);
-    if (now < last) break;
-    last = now;
-  }
+    const uint32_t PIPE_DSL_A = 0x60000 + 0x1A0;
+    uint32_t last = safeMMIORead(PIPE_DSL_A);
+    const int MAX_ITER = 200000;
+    for (int i = 0; i < MAX_ITER; ++i) {
+        uint32_t now = safeMMIORead(PIPE_DSL_A);
+        if (now < last) return; // wrapped -> vblank
+        last = now;
+        if ((i & 0x3FFF) == 0) IOSleep(1); // every ~16384 iterations yield to scheduler
+    }
+    IOLog("⚠️ waitVBlank: timeout after %d iterations\n", MAX_ITER);
 }
 
 
@@ -2184,34 +2198,119 @@ void FakeIrisXEFramebuffer::waitVBlank() {
 
 
 
+bool FakeIrisXEFramebuffer::mapFramebufferIntoGGTT()
+{
+    // -----------------------------
+    // 1) Read BAR1 = GTTMMADR
+    // -----------------------------
+    uint64_t bar1Lo = pciDevice->configRead32(0x18) & ~0xF;
+    uint64_t bar1Hi = pciDevice->configRead32(0x1C);
+    uint64_t gttPhys = (bar1Hi << 32) | bar1Lo;
 
-// Map framebuffer into GGTT aperture (Tiger Lake)
-void FakeIrisXEFramebuffer::mapFramebufferIntoGGTT(IOPhysicalAddress phys, size_t size) {
-    IOLog("🧩 [GGTT] Mapping framebuffer into Tiger Lake GGTT aperture...\n");
+    IOLog("🟢 BAR1 (GTTMMADR) = 0x%llX\n", gttPhys);
 
-    constexpr uint32_t GGTT_BASE_TGL = 0x80000;   // Correct for Tiger Lake
-    constexpr uint32_t PAGE_SIZE1 = 4096;
-    constexpr uint32_t GGTT_VALID = 0x001;        // Valid PTE flag
-    constexpr uint32_t GGTT_CACHE = 0x006;        // Cacheability flags
+    // Map full 16MB GGTT aperture
+    IOMemoryDescriptor* gttDesc =
+        IOMemoryDescriptor::withPhysicalAddress(gttPhys, 0x1000000, kIODirectionInOut);
 
-    size_t numPages = (size + PAGE_SIZE1 - 1) / PAGE_SIZE1;
-    volatile uint64_t* ggtt = reinterpret_cast<volatile uint64_t*>((uintptr_t)mmioBase + GGTT_BASE_TGL);
-
-    for (size_t i = 0; i < numPages; ++i) {
-        uint64_t physPage = (phys + (i * PAGE_SIZE1)) & ~0xFFFULL;
-        uint64_t entry = physPage | GGTT_VALID | GGTT_CACHE;
-        ggtt[i] = entry;
+    if (!gttDesc) {
+        IOLog("❌ Failed to create GGTT descriptor\n");
+        return false;
     }
 
-    IOSleep(10);
-    IOLog("✅ [GGTT] Mapping complete: %zu pages at 0x%llX\n", numPages, (uint64_t)phys);
-    IOLog("🔍 [GGTT] First entry now = 0x%llX\n", (uint64_t)ggtt[0]);
+    IOMemoryMap* gttMap = gttDesc->map();
+    if (!gttMap) {
+        IOLog("❌ Failed to map GTTMMADR\n");
+        gttDesc->release();
+        return false;
+    }
+
+    gttVa = reinterpret_cast<void*>(gttMap->getVirtualAddress());
+    IOLog("🟢 GTTMMADR mapped at VA=%p\n", gttVa);
+
+
+    if (!gttVa || !framebufferMemory) {
+        IOLog("❌ GGTT map: missing gttVa or framebufferMemory\n");
+        return false;
+    }
+
+    volatile uint64_t* ggtt = reinterpret_cast<volatile uint64_t*>(gttVa);
+
+    const uint32_t kPageSize = 4096;
+    const uint64_t kPteFlags = 0x0000000000000003ULL; // Present + writable
+
+
+    // -----------------------------------------
+    // 2) Final, correct GGTT offset for FB
+    // -----------------------------------------
+    // Your framebuffer will appear at GPU VA = 0x08000000
+    // SAFE region: 128MB–144MB is unused by GuC / engines
+    fbGGTTOffset = 0x00000800;
+
+    uint32_t ggttBaseIndex = fbGGTTOffset >> 12;
+
+    IOLog("🟢 GGTT mapping: fbGGTTOffset=0x%08X index=%u\n",
+          fbGGTTOffset, ggttBaseIndex);
+
+
+    // -----------------------
+    // 3) Walk physical pages
+    // -----------------------
+    IOByteCount fbSize = framebufferMemory->getLength();
+    IOByteCount offset = 0;
+
+    uint32_t page = 0;
+
+    while (offset < fbSize)
+    {
+        IOByteCount segLen = 0;
+        IOPhysicalAddress segPhys =
+            framebufferMemory->getPhysicalSegment(offset, &segLen);
+
+        if (!segPhys || segLen == 0) {
+            IOLog("❌ GGTT map: getPhysicalSegment failed at offset 0x%llX\n",
+                  (uint64_t)offset);
+            return false;
+        }
+
+        // Page-align
+        segLen &= ~(kPageSize - 1);
+        if (segLen == 0) {
+            IOLog("❌ GGTT map: segment < 4KB\n");
+            return false;
+        }
+
+        IOLog("   ➤ Physical segment: phys=0x%llX len=0x%llX\n",
+              (uint64_t)segPhys, (uint64_t)segLen);
+
+
+        for (IOByteCount segOff = 0;
+             segOff < segLen && offset < fbSize;
+             segOff += kPageSize, offset += kPageSize, ++page)
+        {
+            uint64_t phys = (uint64_t)(segPhys + segOff);
+
+            uint32_t ggttIndex = ggttBaseIndex + page;
+
+            uint64_t pte = (phys & ~0xFFFULL) | kPteFlags;
+            ggtt[ggttIndex] = pte;
+
+            uint64_t verify = ggtt[ggttIndex];
+
+            IOLog("   GGTT[%u] = 0x%016llX (verify=0x%016llX)\n",
+                  ggttIndex, pte, verify);
+        }
+    }
+
+    IOLog("🟢 GGTT mapping complete (%u pages)\n", page);
+
+    return true;
 }
 
 
- 
- 
- 
+
+
+
  
  
 void FakeIrisXEFramebuffer::disableController() {
@@ -2603,6 +2702,8 @@ void FakeIrisXEFramebuffer::publishDisplay() {
       displayList->release();
       fbDisplays->release();
     
+    
+    
     deliverFramebufferNotification(0, kIOFBNotifyDisplayAdded, nullptr);
         deliverFramebufferNotification(0, kIOFBNotifyDisplayModeChange, nullptr);
         IOLog("✅ publishDisplay(): Sent immediate notifications\n");
@@ -2752,25 +2853,36 @@ IOReturn FakeIrisXEFramebuffer::setBounds(IOIndex index, IOGBounds *bounds) {
 
 
 
-
-IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type, UInt32* flags, IOMemoryDescriptor** memory) {
+IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type, UInt32* flags, IOMemoryDescriptor** memory)
+{
     IOLog("FakeIrisXEFramebuffer::clientMemoryForType() - type: %u\n", type);
 
+    // Cursor memory (keep existing behavior)
     if (type == kIOFBCursorMemory && cursorMemory) {
-        cursorMemory->retain();
+        cursorMemory->retain();       // caller expects a retained descriptor
         *memory = cursorMemory;
         if (flags) *flags = 0;
         return kIOReturnSuccess;
     }
 
-   
-    if (type == kIOFBSystemAperture && framebufferMemory) {
-        framebufferMemory->retain();
-        *memory = framebufferMemory;
-        if (flags) *flags = 0; // allow read/write by default
+    // ---- IMPORTANT: return IODeviceMemory for system aperture ----
+    if (type == kIOFBSystemAperture) {
+        IODeviceMemory *devMem = getVRAMRange(); // your helper that returns IODeviceMemory::withRange(...)
+        if (!devMem) {
+            IOLog("clientMemoryForType: failed to get VRAM IODeviceMemory\n");
+            return kIOReturnNoMemory;
+        }
+
+        // getVRAMRange returns a *new* IODeviceMemory object (with refcount 1),
+        // so hand it to the caller directly.
+        *memory = devMem;
+        if (flags) *flags = 0; // allow read / write
+        IOLog("clientMemoryForType: returned IODeviceMemory for kIOFBSystemAperture phys=0x%llx len=0x%llx\n",
+              (unsigned long long)devMem->getPhysicalAddress(), (unsigned long long)devMem->getLength());
         return kIOReturnSuccess;
     }
 
+    // VRAM type: provide IODeviceMemory (if you also support this)
     if (type == kIOFBVRAMMemory && framebufferSurface) {
         framebufferSurface->retain();
         *memory = framebufferSurface;
@@ -2784,60 +2896,60 @@ IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type, UInt32* flags, 
 
 
 
-
-IOReturn FakeIrisXEFramebuffer::flushDisplay(void)
+// ==== REAL FLUSH WORK (runs on workloop thread) ====
+IOReturn FakeIrisXEFramebuffer::performFlushNow()
 {
-    IOLog("🌀 flushDisplay() called\n");
+    IOLog("FakeIrisXEFB::performFlushNow(): running\n");
 
-    // 1. Safety checks
-    if (!driverActive || !framebufferMemory) {
-        IOLog("❌ flushDisplay: Driver not ready or framebuffer missing\n");
+    if (!framebufferMemory)
         return kIOReturnNotReady;
-    }
-    
-    framebufferMemory->writeBytes(0, framebufferMemory->getBytesNoCopy(), framebufferMemory->getLength());
 
+    void *dst = framebufferMemory->getBytesNoCopy();
+    if (!dst)
+        return kIOReturnError;
 
-    // 2. Get framebuffer base and size
-    void* fbPtr = framebufferMemory->getBytesNoCopy();
-    size_t fbSize = framebufferMemory->getLength();
+    uint32_t *p = (uint32_t *)dst;
+    uint32_t pixels = 1920 * 1080;
 
-    if (!fbPtr || fbSize == 0) {
-        IOLog("❌ flushDisplay: Invalid framebuffer pointer or size\n");
-        return kIOReturnBadArgument;
-    }
-
-    // 3. Memory barrier (safety)
     OSMemoryBarrier();
+    (void) safeMMIORead(PLANE_CTL_1_A);
 
-    // 4. Fill framebuffer with a checker pattern (ARGB8888)
-    uint32_t* pixels = reinterpret_cast<uint32_t*>(fbPtr);
-    const uint32_t width = 1920;
-    const uint32_t height = 1080;
-    const uint32_t stride = width; // in pixels (bytes per row = stride * 4)
-
-    for (uint32_t y = 0; y < height; ++y) {
-        for (uint32_t x = 0; x < width; ++x) {
-            uint32_t offset = y * stride + x;
-
-            // Checkerboard pattern: alternating black/white
-            bool isWhite = ((x / 64) % 2) ^ ((y / 64) % 2);
-            pixels[offset] = isWhite ? 0xFFFFFFFF : 0xFF000000; // ARGB8888: white / black
-           
-            pixels[offset] = 0xFF0000FF; // Solid Blue (ARGB)
-        }
-    }
-
-    
-    // 5. Memory barrier after fill
-    OSMemoryBarrier();
-
-    // 6. Done
-    IOLog("✅ flushDisplay: Framebuffer flushed to display\n");
+    IOLog("FakeIrisXEFB::performFlushNow(): done\n");
     return kIOReturnSuccess;
 }
 
 
+
+// ==== commandGate wrapper ====
+IOReturn FakeIrisXEFramebuffer::staticPerformFlush(
+    OSObject *owner,
+    void *arg0, void *arg1,
+    void *arg2, void *arg3)
+{
+    FakeIrisXEFramebuffer *fb =
+        OSDynamicCast(FakeIrisXEFramebuffer, owner);
+
+    if (!fb) return kIOReturnBadArgument;
+    return fb->performFlushNow();
+}
+
+
+
+// ==== PUBLIC API THAT WINDOWSERVER CALLS ====
+IOReturn FakeIrisXEFramebuffer::flushDisplay(void)
+{
+    IOLog("FakeIrisXEFB::flushDisplay(): schedule work\n");
+
+    if (!commandGate || !workLoop)
+        return performFlushNow(); // fallback safe
+
+    IOReturn r = commandGate->runAction(
+        &FakeIrisXEFramebuffer::staticPerformFlush
+    );
+
+    IOLog("FakeIrisXEFB::flushDisplay(): runAction returned %x\n", r);
+    return r;
+}
 
 
 
