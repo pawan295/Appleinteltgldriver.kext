@@ -23,8 +23,6 @@ class FakeIrisXEFramebuffer : public IOFramebuffer
 
 {
     OSDeclareDefaultStructors(FakeIrisXEFramebuffer)
-
-    friend class IOFramebufferUserClient;
     
 
 private:
@@ -81,6 +79,17 @@ protected:
     
     
     IOMemoryMap* bar0Map;
+
+    enum {
+        kConnectionEnable              = 0x656E6162, // 'enab'
+        kConnectionDisable             = 0x646E626C, // 'dnbl'
+        kConnectionHandleDisplayConfig = 0x68646463, // 'hddc'
+        kConnectionFlush               = 0x666C6773, // 'flgs'
+        kConnectionLinkChanged         = 0x6C636863, // 'lchc'
+        kConnectionSupportsFastSwitch  = 0x73777368, // 'swsh'
+        kConnectionAssign              = 0x61736E73, // 'asns'
+        kConnectionEnableAudio         = 0x656E6175, // 'enau'
+    };
 
     
     
@@ -271,7 +280,7 @@ protected:
     virtual IOReturn flushDisplay(void) ;
     
     
-    virtual void deliverFramebufferNotification(IOIndex index, UInt32 event, void* info);
+//    virtual void deliverFramebufferNotification(IOIndex index, UInt32 event, void* info);
 
     
     virtual IOReturn setNumberOfDisplays(UInt32 count) ;
@@ -279,7 +288,9 @@ protected:
     
     
     
-    virtual IODeviceMemory* getApertureRange(IOPixelAperture aperture) override;
+    virtual IODeviceMemory * getApertureRange(IOPixelAperture aperture) override;
+
+    
     
     virtual IOIndex getAperture() const ;
 
@@ -334,9 +345,9 @@ protected:
     
     virtual IOReturn setOnlineState(IOIndex connectIndex, bool online);
     
-    void vsyncTimerFired(OSObject* owner, IOTimerEventSource* sender);
+  //  void vsyncTimerFired(OSObject* owner, IOTimerEventSource* sender);
     
-    void vsyncOccurred(OSObject* owner, IOInterruptEventSource* src, int count);
+   // void vsyncOccurred(OSObject* owner, IOInterruptEventSource* src, int count);
     
 
     // Essential methods for IOFramebufferUserClient to function
@@ -387,21 +398,43 @@ protected:
                                                   IOUserClient **handler)override;
     
     bool makeUsable();
+    
         static IOReturn staticStopAction(OSObject *owner, void *arg0, void *arg1, void *arg2, void *arg3);
         void performSafeStop(); // actual cleanup executed on workloop/gated thread
+
+    
     IOMemoryDescriptor* gttMemoryDescriptor;
       IOMemoryMap* gttMemoryMap;
       IOMemoryMap* ggttMemoryMap;
-    uint32_t fbGGTTOffset = 0x00000800;
+    
 
+    uint32_t fbGGTTOffset = 0x00000800;
+    
+    bool open(IOService* client, IOOptionBits opts);
+
+    void close(IOService* client, IOOptionBits opts)override;
+
+    IOReturn handleGetAttribute(
+                                                       IOIndex connect, IOSelect attribute, uintptr_t* value);
+
+    
+    bool fIsOpen;
+
+    virtual IOIndex getStartupDepth(void) ;
+    
+    
+    
+    
+    
+    
 private:
    
     void* gttVa = nullptr;
      IOVirtualAddress gttVA = 0;
      volatile uint64_t* ggttMMIO = nullptr;
     
+
+
 };
-
-
 
 /* #endif  _FAKE_IRIS_XE_FRAMEBUFFER_HPP_ */
