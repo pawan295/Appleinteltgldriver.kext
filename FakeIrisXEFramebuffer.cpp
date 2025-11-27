@@ -158,13 +158,16 @@ bool FakeIrisXEFramebuffer::init(OSDictionary* dict) {
     displayPublished = false;
     shuttingDown = false;
     fullyInitialized = false;  // ADD THIS
-    fIsOpen = false;
-
-    
-    
-    
     return true;
 }
+
+
+
+
+
+
+
+
 
 IOPMPowerState FakeIrisXEFramebuffer::powerStates[kNumPowerStates] = {
     {
@@ -374,150 +377,6 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
     
 
-    /*
-    // Improved ACPI device discovery with proper IOACPIPlatformDevice handling
-    IOACPIPlatformDevice *acpiDev = nullptr;
-    const char* targetADR = "0x00020000"; // GFX0 _ADR value
-
-    // Primary ACPI walk with enhanced type safety
-    IOLog("🧭 Starting ACPI plane walk from PCI device\n");
-    IORegistryEntry *acpiWalker = pciDevice;
-    while ((acpiWalker = acpiWalker->getParentEntry(gIOACPIPlane)) != nullptr) {
-        // Safe name and location extraction
-        const char* name = acpiWalker->getName() ? acpiWalker->getName() : "unnamed";
-        const char* location = acpiWalker->getLocation() ? acpiWalker->getLocation() : "no-location";
-        IOLog(" → Visiting ACPI node: %s @ %s\n", name, location);
-
-        // Check if this is actually an IOACPIPlatformDevice
-        IOACPIPlatformDevice *platformDev = OSDynamicCast(IOACPIPlatformDevice, acpiWalker);
-        if (!platformDev) {
-            IOLog("   |_ Not an IOACPIPlatformDevice, skipping\n");
-            continue;
-        }
-
-        // Safe _ADR checking
-        OSData* adr = OSDynamicCast(OSData, platformDev->getProperty("_ADR"));
-        if (adr && adr->getLength() == sizeof(uint32_t)) {
-            uint32_t adrVal = 0;
-            bcopy(adr->getBytesNoCopy(), &adrVal, sizeof(adrVal));
-            IOLog("   |_ _ADR = 0x%08X\n", adrVal);
-            
-            if (adrVal == 0x00020000) {
-                IOLog("✅ Found matching _ADR (0x00020000) - potential GFX0\n");
-                acpiDev = platformDev;
-                acpiDev->retain(); // Take ownership
-                break;
-            }
-        }
-    }
-
-    
-     // Fallback paths with proper type casting
-    if (!acpiDev) {
-        IOLog("🔍 Trying fallback paths to locate GFX0\n");
-        
-        // Array of possible GFX0 paths to try
-        const char* gfx0Paths[] = {
-            "/_SB/PC00/GFX0",
-            "/_SB/PCI0/GFX0",
-            "/_SB/GFX0",
-            nullptr // Sentinel
-        };
-
-        for (int i = 0; gfx0Paths[i] != nullptr; i++) {
-            IORegistryEntry *gfx0Entry = IORegistryEntry::fromPath(gfx0Paths[i], gIOACPIPlane);
-            if (!gfx0Entry) continue;
-            
-            // Proper type casting check
-            IOACPIPlatformDevice *platformDev = OSDynamicCast(IOACPIPlatformDevice, gfx0Entry);
-            if (platformDev) {
-                IOLog("✅ Found GFX0 at path: %s\n", gfx0Paths[i]);
-                acpiDev = platformDev;
-                acpiDev->retain(); // Take ownership
-                gfx0Entry->release(); // Release the intermediate object
-                break;
-            }
-            gfx0Entry->release(); // Clean up if cast failed
-        }
-    }
-    
-    
-    
-    // Final ACPI device validation and _DSM evaluation
-    if (acpiDev) {
-        const char* acpiName = acpiDev->getName();
-        IOLog("✅ Successfully located ACPI parent: %s\n", acpiName ? acpiName : "unnamed");
-
-        // --- _DSM Evaluation with Enhanced Safety ---
-        uint8_t dsmUUID[16] = {
-            0xA0, 0x12, 0x93, 0x6E, 0x50, 0x9A, 0x4C, 0x5B,
-            0x8A, 0x21, 0x3A, 0x36, 0x15, 0x29, 0x2C, 0x79
-        };
-
-        OSObject *dsmParams[4] = { nullptr };
-        bool dsmSuccess = false;
-
-        do { // Error handling scope
-            // Create UUID parameter
-            dsmParams[0] = OSData::withBytes(dsmUUID, sizeof(dsmUUID));
-            if (!dsmParams[0]) {
-                IOLog("❌ Failed to create UUID parameter\n");
-                break;
-            }
-
-            // Create revision parameter
-            dsmParams[1] = OSNumber::withNumber(0ULL, 32);
-            if (!dsmParams[1]) {
-                IOLog("❌ Failed to create revision parameter\n");
-                break;
-            }
-
-            // Create function index parameter
-            dsmParams[2] = OSNumber::withNumber(1ULL, 32);
-            if (!dsmParams[2]) {
-                IOLog("❌ Failed to create function index\n");
-                break;
-            }
-
-            // Create empty package parameter
-            dsmParams[3] = OSArray::withCapacity(0);
-            if (!dsmParams[3]) {
-                IOLog("❌ Failed to create package parameter\n");
-                break;
-            }
-
-     
-        
-            // Evaluate _DSM - now properly on IOACPIPlatformDevice
-            OSObject *dsmResult = nullptr;
-            IOReturn ret = acpiDev->evaluateObject("_DSM", &dsmResult, dsmParams, 4);
-            
-            if (ret == kIOReturnSuccess && dsmResult) {
-                IOLog("✅ _DSM evaluation succeeded (%s)\n",
-                      dsmResult->getMetaClass()->getClassName());
-                dsmResult->release();
-                dsmSuccess = true;
-            } else {
-                IOLog("❌ _DSM evaluation failed (0x%x)\n", ret);
-            }
-        } while (false);
-
-        // Cleanup parameters
-        for (int i = 0; i < 4; i++) {
-            if (dsmParams[i]) dsmParams[i]->release();
-        }
-
-        if (!dsmSuccess) {
-            IOLog("⚠️ _DSM method did not execute successfully\n");
-        }
-
-        acpiDev->release(); // Release our retained reference
-    } else {
-        IOLog("❌ Failed to locate GFX0 ACPI device\n");
-        setProperty("ACPI-Status", "GFX0-not-found");
-    }
-    */
-    
     
     pciDevice = OSDynamicCast(IOPCIDevice, provider);
     if (!pciDevice) {
@@ -612,10 +471,9 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
         return false;
     }
     mmioBase = (volatile uint8_t*)mmioMap->getVirtualAddress();
-    IOLog("✅ BAR0 mapped successfully (len: 0x%llX)\n", mmioMap->getLength());
+    IOLog("BAR0 mapped successfully (len: 0x%llX)\n", mmioMap->getLength());
 
-    // ❌⛔️ NEVER TOUCH MMIO YET – GPU NOT READY!
-
+  
     
     
     
@@ -710,7 +568,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
-/*
+
     // === GPU Acceleration Properties ===
     {
         // Required properties for Quartz Extreme / Core Animation
@@ -725,8 +583,12 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
                    IOLog("GPU Acceleration Properties used\n"); // Added newline for cleaner log
                }
     }
-  */
+  
 
+    
+    
+    
+    
     
     //display bounds
     OSDictionary* bounds = OSDictionary::withCapacity(2);
@@ -836,36 +698,33 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     } else {
         IOLog("❌ Failed to create framebuffer surface\n");
     }
-
-    
-    
-    
-    if (kernelFBPtr) {
-        uint32_t *px = (uint32_t *)kernelFBPtr;
-        size_t pixels = (1920 * 1080);
-        for (size_t i = 0; i < pixels; i++) {
-            px[i] = 0xFF0000FF; // ARGB = solid red (A=255, R=0, G=0, B=255)
-        }
-        IOLog("🟥 Filled framebuffer with test color\n");
-    }
-
     
     
     
     
+    
+    /*
     // Create work loop and command gate
-    workLoop = IOWorkLoop::workLoop();
-    if (!workLoop) {
-        IOLog("❌ Failed to create work loop\n");
-        return false;
-    }
-
-       
-       commandGate = IOCommandGate::commandGate(this);
-       if (!commandGate || workLoop->addEventSource(commandGate) != kIOReturnSuccess) {
-           IOLog("Failed to create command gate\n");
+    workLoop = super::getWorkLoop();   // IOFramebuffer's internal loop
+       if (!workLoop) {
+           IOLog("❌ getWorkLoop() returned null\n");
            return false;
        }
+       workLoop->retain();   // since you're storing it in a member
+
+       commandGate = IOCommandGate::commandGate(this);
+       if (!commandGate ||
+           workLoop->addEventSource(commandGate) != kIOReturnSuccess) {
+           IOLog("Failed to create/add commandGate\n");
+           OSSafeReleaseNULL(commandGate);
+           return false;
+       }
+    */
+    
+    
+    
+    
+    
     
     
 /*
@@ -971,7 +830,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
     
     
-    /*
+    
     // Setup vsyncTimer for screen refresh (simulation only)
     if (workLoop && !isInactive()) {  // Add safety check
         vsyncTimer = IOTimerEventSource::timerEventSource(
@@ -988,141 +847,26 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
         }
     }
 
-*/
      
-     
- 
- 
-      
-    OSDictionary* displayInfo = OSDictionary::withCapacity(1);
-    OSDictionary* brightness = OSDictionary::withCapacity(1);
-    brightness->setObject("min", OSNumber::withNumber(10, 32));
-    brightness->setObject("max", OSNumber::withNumber(255, 32));
-    displayInfo->setObject("brightness", brightness);
-    setProperty("IODisplayParameters", displayInfo);
-
-    setProperty("default-width", 1920, 32);
-    setProperty("default-height", 1080, 32);
     
-    setProperty("IOFBDepth", 32, 32); // For ARGB8888
-
     
-    setProperty("IOFBHas3DAccelerator", kOSBooleanTrue);
-    setProperty("IOFramebufferPrefersWG", kOSBooleanTrue); // optional
-    setProperty("IOFBSystemPowerProfile", OSString::withCString("Full"));
-
-    setProperty("IOAccelRevision", 2, 32);
-    setProperty("IOAccelVRAMSize", framebufferMemory->getLength(), 64);    setProperty("IOFBNeedsRefresh", kOSBooleanFalse);
-    setProperty("IOFBHostAccessFlags", (uintptr_t)0x1); // host write allowed
-
-    setProperty("IOFBUserClientClass", OSSymbol::withCString("IOFramebufferUserClient"));
-    setProperty("IOFBSharedUserClient", kOSBooleanTrue);
-    setProperty("IOFramebufferSharedUserClient", kOSBooleanTrue);
-
     
-    setProperty(kIOFBConsoleKey, kOSBooleanTrue);               // IOFramebufferIsConsole
-    setProperty(kIOConsoleSafeBoot, kOSBooleanTrue);            // IOConsoleSafe
-    setProperty(kIOKitConsoleSecurityKey, kOSBooleanTrue);      // IOKitConsoleSecurity
-
-    setProperty("AAPL,aux-power-connected", kOSBooleanTrue);
-
-    setProperty("IOFBIsMainDisplay", kOSBooleanTrue);
-    setProperty("IOFBWidth", 1920ULL);
+    
+    
+    setProperty("IOFBWidth",  1920ULL);
     setProperty("IOFBHeight", 1080ULL);
-    setProperty("IOFBPixelFormat", "AR24"); // or "ARGB8888"
-
-    
-    setProperty("IOFBConfig", 1, 32);
-    setProperty("IOFBDisplayModeID", OSNumber::withNumber((UInt64)0, 32)); // Default mode
-    setProperty("IOFBStartupModeTimingID", OSNumber::withNumber((UInt64)0, 32));
-     
-     
-    setProperty("AAPL,boot-display", kOSBooleanTrue);
-
-    setProperty("IOFramebufferOpenGLIndex", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFramebufferSharedIndex", OSNumber::withNumber((UInt64)0, 32));
-
-    
-    setProperty("IOFBAccelerator", kOSBooleanTrue);
-    setProperty("IOFBDependentIndex",OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFBCursorInfo", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFBTransform", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFBGammaHeaderSize", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFBWaitCursorFrames", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFBClientConnectIndex", 1, 32);
-    setProperty("IOFBCursorSupported", kOSBooleanFalse);
-    setProperty(kIOFBHardwareCursorSupportedKey, kOSBooleanFalse);
-        
-    setProperty(kIOFBScalerInfoKey, 0ULL, 32);
-    setProperty(kIOFBDisplayModeCountKey, static_cast<UInt64>(1), 32);
-    setProperty("IOFBCurrentPixelCount", 1920ULL * 1080ULL, 128);
-    setProperty("IOFBCursorScale", 0x10000, 32); // 1.0 fixed-point
-    setProperty("IOFBDisplayCount", (uint32_t)1);
-    setProperty("IOFBVerbose", kOSBooleanTrue);
-    setProperty("IOFBTranslucencySupport", kOSBooleanTrue);
-    setProperty("IOSupportsCLUTs", kOSBooleanTrue);
-    setProperty("AAPL,HasPanel", kOSBooleanTrue);
-    setProperty("built-in", kOSBooleanTrue);
-    setProperty("AAPL,gray-page", kOSBooleanTrue);
-    setProperty("IOFBTransparency", kOSBooleanTrue);
-    setProperty("IOSurfaceSupport", kOSBooleanTrue);
-
-
-    setProperty("IOProviderClass", "IOPCIDevice");
-  
-    /*
-    setProperty("MetalPluginName", OSSymbol::withCString("AppleIntelICLLPGraphicsMTLDriver"));
-    setProperty("MetalPluginClassName", OSSymbol::withCString("AppleIntelICLLPGraphicsMTLDriver")); // Should match MetalPluginName
-    setProperty("MetalPluginVersion", OSNumber::withNumber(120ULL, 32));
-    setProperty("MetalFeatures", OSNumber::withNumber(0xFFFFFFFFULL, 32)); // Use ULL for consistency
-      */
-    
-    
-    getProvider()->setProperty("VRAM,totalsize", framebufferMemory->getLength(), 64);
-    
-    setProperty("IOFBConnectFlags", kIOConnectionBuiltIn, 32);
-    setProperty("IOFBCurrentConnection", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("model", OSData::withBytes("Intel Iris Xe Graphics", 22));
-    setProperty("IOFramebufferDisplayIndex", (uint32_t)0);
-    setProperty("IOFBStartupDisplayModeTimingID", OSNumber::withNumber((UInt64)0, 32));
-    setProperty("IOFramebufferDisplay", kOSBooleanTrue);     // Very important
-
-    
-    setProperty(kIOConsoleDeviceKey, kOSBooleanTrue);
-
-    setProperty("IOConsoleFramebuffer", kOSBooleanTrue);
-
-    
-    
-    
-    setProperty("IOConsole", kOSBooleanTrue);
-    setProperty("IOFBConsole", 1,32);
-    setProperty("IOFBConsoleVisible", kOSBooleanTrue);
-    setProperty("IOConsoleLocked", kOSBooleanFalse);
-    
-    setProperty(kIOFBScalerInfoKey, 0ULL, 32);
-    setProperty(kIOFBDisplayModeCountKey, 1ULL, 32);
-    setProperty("IOFBCurrentPixelCount", 1920ULL * 1080ULL, 128);
-    setProperty("IOFBWidth", 1920, 32);
-    setProperty("IOFBHeight", 1080, 32);
+    setProperty("IOFBDepth",  32, 32);
     setProperty("IOFBBytesPerRow", 1920 * 4, 32);
     setProperty("IOFBMemorySize", framebufferMemory->getLength(), 32);
+    setProperty("IOFBOnline", kOSBooleanTrue);
+    setProperty("IOFBDisplayModeCount", (uint64_t)1, 32);
+    setProperty("IOFBPixelFormat", "AR24");
+    setProperty("IOFBIsMainDisplay", kOSBooleanTrue);
+    setProperty("AAPL,boot-display", kOSBooleanTrue);
 
     
-    setProperty("IOFBGammaWidth", 8, 32);
-    setProperty("IOFBGammaCount", 256, 32);
-    setProperty("IOFBGammaChannelCount", 3, 32);
-
     
-    setProperty("IOFramebuffer", kOSBooleanTrue);
 
-
-    OSArray* pixelFormats = OSArray::withCapacity(2);
-    pixelFormats->setObject(OSData::withBytes("AR24", 4)); // ARGB8888
-    setProperty("IOFBSupportedPixelFormats", pixelFormats);
-    pixelFormats->release();
-
-    
 
     // Cursor
     cursorMemory = IOBufferMemoryDescriptor::inTaskWithOptions(
@@ -1149,60 +893,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
            cursorSizeNum->release();
        }
   
-    
-    
-    
 
-    setProperty("IOFBNumberOfConnections", 1, 32);
-    setProperty("IOFBConnectionFlags", OSNumber::withNumber(0x100, 32));
-    setProperty("IOConsoleMode", kOSBooleanTrue); // Use mode 0 as default
-    
-
-    setProperty("IOFBOnline", kOSBooleanTrue);
-    setProperty("IOFBIsConsoleDevice", kOSBooleanTrue);     // safer than `true`
-    setProperty("IOConsoleSafe", kOSBooleanTrue);           // optional but helps
-    setProperty("IOFBIsConnectionReady", kOSBooleanTrue);
-
-    setProperty("IOFBMemoryCount", 2, 32);  // VRAM + Cursor memory
-    setProperty("IOFBVRAMSize", framebufferMemory->getLength(), 32);
-    setProperty("IOFBRowBytes", 1920 * 4, 32);
-    setProperty(kIOFBNeedsRefreshKey, kOSBooleanFalse);
-    setProperty("IOFBBytesPerPixel", (UInt32)4);
-
-
-
-    
-    IORegistryEntry* display = IORegistryEntry::fromPath("IOService:/IOResources/IOBacklightDisplay");
-    if (display) {
-        display->setProperty("IOBacklightDisplay", kOSBooleanFalse);
-        display->release();
-        IOLog("Forced display wake\n");
-    }
-
-    
-    
-    
-    
-    
-    
-    //real display mode dictionary
-    // Proper display mode setup
-    OSDictionary* mode0 = OSDictionary::withCapacity(6);
-    if (mode0) {
-        mode0->setObject("IOFBModeID", OSNumber::withNumber(0ULL, 32));
-        mode0->setObject("IOFBWidth", OSNumber::withNumber(1920ULL, 32));
-        mode0->setObject("IOFBHeight", OSNumber::withNumber(1080ULL, 32));
-        mode0->setObject("IOFBBytesPerRow", OSNumber::withNumber(7680ULL, 32));
-        mode0->setObject("IOFBBitsPerPixel", OSNumber::withNumber(32ULL, 32));
-        mode0->setObject("IOFBRefreshRate", OSNumber::withNumber(60ULL << 16, 32));
-        
-        OSDictionary* modesDict = OSDictionary::withCapacity(1);
-        modesDict->setObject("0", mode0);
-        setProperty("IOFBDisplayModeInformation", modesDict);
-        
-        mode0->release();
-        modesDict->release();
-    }
     
     
     
@@ -1223,7 +914,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
-    
+    /*
     if (workLoop) {
         IOTimerEventSource* activateTimer = IOTimerEventSource::timerEventSource(
             this,
@@ -1242,123 +933,15 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
             IOLog("⏰ Timer scheduled for 5s\n");
         }
     }
+*/
+    
+    activatePowerAndController();
 
     
     
-    
-    
-    
-
-    setProperty(kIOConsoleFramebufferKey, kOSBooleanTrue);
-    setProperty(kIOFramebufferConsoleKey, kOSBooleanTrue);
-    
-    
-    
-/*
-    // 3. ✅ PE_Video console registration
-    PE_Video consoleInfo;
-    bzero(&consoleInfo, sizeof(consoleInfo));
-
-    consoleInfo.v_baseAddr = (unsigned long)(framebufferMemory->getPhysicalAddress());
-    if (!consoleInfo.v_baseAddr) {
-        IOLog("❌ Invalid framebuffer address at PE_Video console registration\n");
-        return false;
-    }
-    
-    consoleInfo.v_display  = 3;
-    consoleInfo.v_width    = 1920;
-    consoleInfo.v_height   = 1080;
-    consoleInfo.v_rowBytes = 1920 * 4;
-    consoleInfo.v_depth    = 32;
-
-    IOSleep(200);
-    if (getPlatform()) {
-        getPlatform()->setConsoleInfo(&consoleInfo, 0);
-        IOLog("✅ PE_Video set: v_baseAddr=0x%lx\n", consoleInfo.v_baseAddr);
-        IOSleep(200);
-    //    deliverFramebufferNotification(0, kIOFBNotifyConsoleReady, nullptr);
-        if (getProperty("IOFramebufferConsoleKey")) {
-            IOLog("✅ Console registered in IORegistry\n");
-        } else {
-            IOLog("❌ Console not registered in IORegistry\n");
-        }
-    } else {
-        IOLog("❌ getPlatform() returned nullptr\n");
-        return false;
-    }
-    
-    
-    IOLog("🖥️  PE_Video initialized: %lux%lu stride=%lu depth=%lu addr=0x%lx\n",
-          consoleInfo.v_width,
-          consoleInfo.v_height,
-          consoleInfo.v_rowBytes,
-          consoleInfo.v_depth,
-          consoleInfo.v_baseAddr);
-    
-   */
-     
-
-    
-    IOService::getPlatform()->setProperty("IOFramebufferConsoleKey", kOSBooleanTrue);
-    
-    
-    publishDisplay();
-
+  
     // 6. Then flush and notify
     flushDisplay();
-
-    
-    
-    /*
-    // 5. Notify WindowServer
-    deliverFramebufferNotification(0, kIOFBNotifyWillPowerOn, nullptr);
-    deliverFramebufferNotification(0, kIOFBNotifyDidPowerOn, nullptr);
-    deliverFramebufferNotification(0, 0x10, nullptr);      // display mode set complete
-    deliverFramebufferNotification(0, 'dmod', nullptr);    // publish mode
-    deliverFramebufferNotification(0, kIOFBNotifyDisplayModeWillChange, nullptr);
-    deliverFramebufferNotification(0, kIOFBNotifyDisplayModeDidChange, nullptr);
-    */
-    
-    
-    
-    /*
-    //debug verification
-    IOLog("===== CONSOLE STATUS VERIFICATION ====\n");
-    IOLog("isConsoleDevice(): %s\n", isConsoleDevice() ? "YES" : "NO");
-    IOLog("IOFramebufferConsoleKey: %s\n",
-          getProperty(kIOFramebufferConsoleKey) ? "SET" : "MISSING");
-*/
-     
-     
-    IORegistryEntry* console = IORegistryEntry::fromPath("/IOConsole", gIOServicePlane);
-    if (console) {
-        IOLog("Current console: %s\n", console->getName());
-        console->release();
-    } else {
-    //    IOLog("No console registered in IORegistry!\n");
-    }
-    IOLog("  🔎 After forcing console props: IOConsoleDevice=%s\n",
-          getProperty("IOConsoleDevice") ? "true" : "false");
-
-    
-    
-    IORegistryEntry *wranglerEntry = IORegistryEntry::fromPath("/IOResources/IODisplayWrangler");
-    if (wranglerEntry) {
-        IOService *wrangler = OSDynamicCast(IOService, wranglerEntry);
-        if (wrangler) {
-            IOLog("(FakeIrisXEFramebuffer) Forcing attach to IODisplayWrangler and promoting as console\n");
-
-            // Safely attach to the display wrangler hierarchy
-            this->attachToParent(wrangler, gIOServicePlane);
-
-            // Promote to console framebuffer
-            wrangler->setProperty("IOFramebuffer", kOSBooleanTrue);
-            setProperty("IOFramebufferIsConsole", kOSBooleanTrue);
-            setProperty("IOConsoleDevice", kOSBooleanTrue);
-        }
-        wranglerEntry->release();
-    }
-
 
     
     
@@ -1402,9 +985,21 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
-    // Clean up temporary OSObjects
-    if (displayInfo) displayInfo->release();
-    if (brightness)   brightness->release();
+    
+    // 5. Notify WindowServer
+    deliverFramebufferNotification(0, kIOFBNotifyWillPowerOn, nullptr);
+    deliverFramebufferNotification(0, kIOFBNotifyDidPowerOn, nullptr);
+    deliverFramebufferNotification(0, 0x10, nullptr);      // display mode set complete
+    deliverFramebufferNotification(0, 'dmod', nullptr);    // publish mode
+    deliverFramebufferNotification(0, kIOFBNotifyDisplayModeWillChange, nullptr);
+    deliverFramebufferNotification(0, kIOFBNotifyDisplayModeDidChange, nullptr);
+    deliverFramebufferNotification(0, kIOFBNotifyDisplayAdded, nullptr);
+    deliverFramebufferNotification(0, kIOFBNotifyDisplayModeChange, nullptr);
+    deliverFramebufferNotification(0, kIOFBConfigChanged, nullptr);
+    IOLog("WS notified\n");
+    
+    
+    
     
     IOLog("🏁 FakeIrisXEFramebuffer::start() - Completed\n");
     return true;
@@ -1516,6 +1111,19 @@ void FakeIrisXEFramebuffer::performSafeStop()
         pciDevice = nullptr;
     }
 
+    
+    if (workLoop) {
+        if (commandGate) {
+            workLoop->removeEventSource(commandGate);
+            commandGate->release();
+            commandGate = nullptr;
+        }
+        workLoop->release();  // release *your* retain only
+        workLoop = nullptr;
+    }
+
+    
+    
     IOLog("FakeIrisXEFramebuffer::performSafeStop() — gated cleanup complete\n");
 }
 
@@ -1543,7 +1151,6 @@ void FakeIrisXEFramebuffer::startIOFB() {
 void FakeIrisXEFramebuffer::free() {
     IOLog("FakeIrisXEFramebuffer::free() called\n");
     
-    // ✅ CLEANUP ALL ALLOCATED RESOURCES
     if (clutTable) {
         IOFree(clutTable, 256 * sizeof(IOColorEntry));
         clutTable = nullptr;
@@ -1579,54 +1186,34 @@ void FakeIrisXEFramebuffer::free() {
     
     driverActive = false;
     
+
+        if (vsyncTimer) {
+            workLoop->removeEventSource(vsyncTimer);
+            vsyncTimer->release();
+            vsyncTimer = nullptr;
+        }
+      
+    
+    
+    
     if (workLoop) {
         if (commandGate) {
             workLoop->removeEventSource(commandGate);
             commandGate->release();
             commandGate = nullptr;
         }
-        if (vsyncTimer) {
-            workLoop->removeEventSource(vsyncTimer);
-            vsyncTimer->release();
-            vsyncTimer = nullptr;
-        }
-        workLoop->release();
+        workLoop->release();  // release *your* retain only
         workLoop = nullptr;
     }
+
+    
+    
     
     OSSafeReleaseNULL(framebufferSurface);
     OSSafeReleaseNULL(cursorMemory);
     
     super::free();
 }
-
-
-
-
-bool FakeIrisXEFramebuffer::open(IOService* client, IOOptionBits opts)
-{
-    // IOService::open only takes (client)
-    if (!IOService::open(client))
-        return false;
-
-    fIsOpen = true;
-    IOLog("FakeIrisXEFramebuffer::open() — client=%s\n",
-          client ? client->getName() : "<null>");
-    return true;
-}
-
-void FakeIrisXEFramebuffer::close(IOService* client, IOOptionBits opts)
-{
-    IOLog("FakeIrisXEFramebuffer::close() — client=%s\n",
-          client ? client->getName() : "<null>");
-
-    fIsOpen = false;
-
-    // IOService::close also takes only (client)
-    IOService::close(client);
-}
-
-
 
 
 
@@ -1639,12 +1226,6 @@ void* FakeIrisXEFramebuffer::getFramebufferKernelPtr() const {
 
 
 
-
-
-IOWorkLoop* FakeIrisXEFramebuffer::getWorkLoop() const {
-    return workLoop;
-}
-
 bool FakeIrisXEFramebuffer::makeUsable() {
     IOLog("makeUsable() called\n");
     return super::makeUsable();
@@ -1653,10 +1234,10 @@ bool FakeIrisXEFramebuffer::makeUsable() {
 
 
 void FakeIrisXEFramebuffer::activatePowerAndController() {
-    IOLog("⚡️ Delayed Power and Controller Activation\n");
+    IOLog("Delayed Power and Controller Activation\n");
     
     if (!pciDevice || !mmioBase) {
-        IOLog("❌ activatePowerAndController: device or mmio not ready, aborting\n");
+        IOLog(" activatePowerAndController: device or mmio not ready, aborting\n");
         return;
     }
 
@@ -1664,89 +1245,84 @@ void FakeIrisXEFramebuffer::activatePowerAndController() {
     controllerEnabled = true;
     
     enableController();
+    
     // Verify GPU still alive
         uint32_t ack = safeMMIORead(0x130044);
         IOLog("FORCEWAKE_ACK after enableController(): 0x%08X\n", ack);
 
     
-    
-    
-    
-    PMinit();
-    
-   // registerPowerDriver(this, powerStates, kNumPowerStates);
+        
    getProvider()->joinPMtree(this);
-     
+    // PMinit is void — no return check needed
+    PMinit();
+    IOLog("✅ PMinit called (void — no error check possible)\n");
+
+    // Register power driver (this is the key — enables setPowerState callbacks)
+   // registerPowerDriver(this, powerStates, kNumPowerStates);
+    IOLog("✅ Power management registered\n");
    
     
     
-    makeUsable();
+   // makeUsable();
    
     
     
     
-    displayOnline = true;
+    //displayOnline = true;
 
     
-    setProperty("IOFBOnline", true);
-    setProperty("IOConsoleSafe", kOSBooleanTrue);
-    
-     
-    IOLog("✅ Delayed power and display activation complete\n");
-
-     
-     }
-
-
-
-
-
-bool FakeIrisXEFramebuffer::initializeHardware() {
-    IOLog("initializeHardware() called\n");
-
-    // Map MMIO space
-    mmioMap = pciDevice->mapDeviceMemoryWithIndex(0);
-
-    if (!mmioMap) {
-        IOLog("Failed to map MMIO\n");
-        return false;
-    }
-    
-    mmioBase = reinterpret_cast<volatile UInt8*>(mmioMap->getVirtualAddress());
-
-    // Initialize hardware here
-    // ... GPU-specific initialization code ...
-    
-    return true;
+    IOLog("Delayed power and display activation complete\n");
+        
 }
 
-bool FakeIrisXEFramebuffer::setupVRAM() {
-    IOLog("setupVRAM() called\n");
-    
-    
-    vramSize = 1920 * 1080 * 4;  // Ensure this is set
-    vramMemory = IOBufferMemoryDescriptor::withOptions(
-        kIODirectionInOut | kIOMemoryKernelUserShared,
-        vramSize,
-        PAGE_SIZE);
-    
-    if (!vramMemory) {
-        IOLog("Failed to allocate VRAM\n");
-        return false;
+
+
+
+
+
+IOReturn FakeIrisXEFramebuffer::newUserClient(task_t owningTask,
+                                              void* securityID,
+                                              UInt32 type,
+                                              OSDictionary* properties,
+                                              IOUserClient **handler)
+{
+    IOLog("[FakeIrisXEFramebuffer] newUserClient(type=%u)\n", type);
+
+    //
+    // Call the REAL IOFramebuffer::newUserClient !!!
+    // We do this because WindowServer REQUIRES the real framebuffer UC.
+    //
+
+    IOFramebuffer* fb = OSDynamicCast(IOFramebuffer, this);
+
+    if (!fb) {
+        IOLog("[FakeIrisXEFramebuffer] ERROR: this is not an IOFramebuffer\n");
+        return kIOReturnUnsupported;
     }
-    
-    // Clear screen to black
-       void* fbAddr = framebufferMemory->getBytesNoCopy();
-       if (fbAddr) {
-           memset(fbAddr, 0, framebufferMemory->getLength());
-       } else {
-           IOLog("❌ setupVRAM(): Failed to get framebuffer memory address.\n");
-           return false;
-       }
-    
-    
-    return true;
+
+    //
+    // Real IOFramebuffer::newUserClient has signature:
+    // IOReturn newUserClient(task_t, void*, UInt32, IOUserClient**)
+    //
+    // So we pass ONLY 4 args, not 5.
+    //
+
+    IOReturn ret = fb->IOFramebuffer::newUserClient(owningTask,
+                                                    securityID,
+                                                    type,
+                                                    handler);
+
+    if (ret != kIOReturnSuccess) {
+        IOLog("[FakeIrisXEFramebuffer] real IOFramebuffer::newUserClient failed (%x)\n", ret);
+        return ret;
+    }
+
+    IOLog("[FakeIrisXEFramebuffer] returned REAL IOFramebufferUserClient OK\n");
+    return kIOReturnSuccess;
 }
+
+
+
 
 
 
@@ -1794,47 +1370,6 @@ void FakeIrisXEFramebuffer::vblankTick(IOTimerEventSource* sender)
 
 
 
-
-IOReturn FakeIrisXEFramebuffer::newUserClient(task_t owningTask,
-                                              void* securityID,
-                                              UInt32 type,
-                                              OSDictionary* properties,
-                                              IOUserClient **handler)
-{
-    IOLog("[FakeIrisXEFramebuffer] newUserClient(type=%u)\n", type);
-
-    //
-    // Call the REAL IOFramebuffer::newUserClient !!!
-    // We do this because WindowServer REQUIRES the real framebuffer UC.
-    //
-
-    IOFramebuffer* fb = OSDynamicCast(IOFramebuffer, this);
-
-    if (!fb) {
-        IOLog("[FakeIrisXEFramebuffer] ERROR: this is not an IOFramebuffer\n");
-        return kIOReturnUnsupported;
-    }
-
-    //
-    // Real IOFramebuffer::newUserClient has signature:
-    // IOReturn newUserClient(task_t, void*, UInt32, IOUserClient**)
-    //
-    // So we pass ONLY 4 args, not 5.
-    //
-
-    IOReturn ret = fb->IOFramebuffer::newUserClient(owningTask,
-                                                    securityID,
-                                                    type,
-                                                    handler);
-
-    if (ret != kIOReturnSuccess) {
-        IOLog("[FakeIrisXEFramebuffer] real IOFramebuffer::newUserClient failed (%x)\n", ret);
-        return ret;
-    }
-
-    IOLog("[FakeIrisXEFramebuffer] returned REAL IOFramebufferUserClient OK\n");
-    return kIOReturnSuccess;
-}
 
 
 
@@ -2073,7 +1608,7 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     trans |= (1u << 31);
     wr(TRANS_CONF_A, trans);
     IOSleep(5);
-    IOLog("✅ TRANS_CONF_A now=0x%08X\n", rd(TRANS_CONF_A));
+    IOLog("TRANS_CONF_A now=0x%08X\n", rd(TRANS_CONF_A));
 
     // --- Enable DDI A buffer ---
     uint32_t ddi = rd(DDI_BUF_CTL_A);
@@ -2082,7 +1617,7 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     ddi |= (1u << 24);
     wr(DDI_BUF_CTL_A, ddi);
     IOSleep(5);
-    IOLog("✅ DDI_BUF_CTL_A now=0x%08X\n", rd(DDI_BUF_CTL_A));
+    IOLog("DDI_BUF_CTL_A now=0x%08X\n", rd(DDI_BUF_CTL_A));
 
 
     // --- Power up eDP Panel ---
@@ -2093,7 +1628,7 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     for (int i = 0; i < 100; i++) {
         uint32_t status = rd(PP_STATUS);
         if (status & (1 << 31)) {
-            IOLog("✅ eDP panel power sequence complete (PP_STATUS=0x%08X)\n", status);
+            IOLog("eDP panel power sequence complete (PP_STATUS=0x%08X)\n", status);
             break;
         }
         IOSleep(10);
@@ -2107,7 +1642,7 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     wr(BXT_BLC_PWM_FREQ1, 0x0000FFFF);
     wr(BXT_BLC_PWM_DUTY1, 0x00007FFF);
     wr(BXT_BLC_PWM_CTL1,  0x80000000);
-    IOLog("✅ Backlight PWM enabled (50%% duty)\n");
+    IOLog("Backlight PWM enabled (50%% duty)\n");
     IOSleep(10);
 
     
@@ -2151,31 +1686,9 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     IOLog("  TRANS_CONF_A        = 0x%08X\n", rd(TRANS_CONF_A));
     IOLog("  DDI_BUF_CTL_A       = 0x%08X\n", rd(DDI_BUF_CTL_A));
 
-    IOLog("✅✅✅ enableController(V38) complete.\n");
+    IOLog("enableController(V38) complete.\n");
     return kIOReturnSuccess;
 }
-
-
-
-
-IOReturn FakeIrisXEFramebuffer::setAbltFramebuffer(void *buffer) {
- 
-    IOLog("FakeIrisXEFB::setAbltFramebuffer(%p) — stub, ignoring\n", buffer);
-       // Do NOT store or dereference the pointer.
-    //wsFrontBuffer = buffer;           // WS-owned shadow
-  return kIOReturnSuccess;
-}
-
-
-
-
-IOReturn FakeIrisXEFramebuffer::flushFramebuffer(void)
-{
-    IOLog("FakeIrisXEFB::flushFramebuffer() — stub (no-op)\n");
-    // We rely on hardware scanning out the FB we already filled in enableController().
-    return kIOReturnSuccess;
-}
-
 
 
 
@@ -2191,7 +1704,7 @@ void FakeIrisXEFramebuffer::waitVBlank() {
         last = now;
         if ((i & 0x3FFF) == 0) IOSleep(1); // every ~16384 iterations yield to scheduler
     }
-    IOLog("⚠️ waitVBlank: timeout after %d iterations\n", MAX_ITER);
+    IOLog("waitVBlank: timeout after %d iterations\n", MAX_ITER);
 }
 
 
@@ -2281,7 +1794,7 @@ bool FakeIrisXEFramebuffer::mapFramebufferIntoGGTT()
             return false;
         }
 
-        IOLog("   ➤ Physical segment: phys=0x%llX len=0x%llX\n",
+        IOLog("Physical segment: phys=0x%llX len=0x%llX\n",
               (uint64_t)segPhys, (uint64_t)segLen);
 
 
@@ -2320,107 +1833,15 @@ void FakeIrisXEFramebuffer::disableController() {
     // Disable pipe (example offsets)
     const uint32_t DSPACNTR = 0x70180;
     *(volatile uint32_t*)(mmioBase + DSPACNTR) &= ~0x80000000;
-    IOLog("✅ Controller disabled\n");
+    IOLog("Controller disabled\n");
 }
  
- 
- 
- 
-
-
-IOReturn FakeIrisXEFramebuffer::getOnlineState(IOIndex connectIndex, bool* online)
-{
-    if (connectIndex != 0) return kIOReturnBadArgument;
-    *online = displayOnline;
-    IOLog("getOnlineState: %d\n", displayOnline);
-    return kIOReturnSuccess;
-}
-
-
-
-IOReturn FakeIrisXEFramebuffer::setAttributeForConnection(
-    IOIndex connectIndex,
-    IOSelect attribute,
-    uintptr_t value)
-{
-    IOLog("FakeIrisXEFB::setAttributeForConnection attr=%08x\n", attribute);
-    return kIOReturnSuccess;
-}
-
-
-
-
-
-
-IOReturn FakeIrisXEFramebuffer::setOnlineState(IOIndex connectIndex, bool online)
-{
-    if (connectIndex != 0) return kIOReturnBadArgument;
-       IOLog("setOnlineState: %d\n", online);
-       displayOnline = online; // Update member variable
-       return kIOReturnSuccess;
-   }
-
-
-bool FakeIrisXEFramebuffer::setupDisplayModes() {
-    IOLog("setupDisplayModes() called\n");
-    
-       setNumberOfDisplays(1);
-       return true;
-}
-
-
-
-
-
-
-bool FakeIrisXEFramebuffer::isConsoleDevice() const {
-    return true;
-}
-
-
-
-
-IOIndex FakeIrisXEFramebuffer::getStartupDepth(void)
-{
-    IOLog("FakeIrisXEFB::getStartupDepth() called\n");
-    return 32;  // ARGB8888
-}
-
 
 
 bool FakeIrisXEFramebuffer::getIsUsable() const {
     return true;
 }
 
-IOReturn FakeIrisXEFramebuffer::setOnline(bool online) {
-
-    IOLog("setOnline() called\n");
-        displayOnline = online;
-        // Return kIOReturnSuccess for both online/offline states if you handle them.
-        return kIOReturnSuccess;
-}
-
-IOReturn FakeIrisXEFramebuffer::getConnectionFlags(IOIndex connectIndex, UInt32* flags) {
-    if (!flags) return kIOReturnBadArgument;
-    *flags = kIOConnectionBuiltIn;  // Essential
-    return kIOReturnSuccess;
-}
-
-
-
-IOReturn FakeIrisXEFramebuffer::notifyServer(IOSelect message, void* data, size_t dataSize) {
-    IOLog("notifyServer() called: message = 0x%08X\n", message);
-
-    switch (message) {
-        case kIOFBNotifyDisplayModeChange:
-            // TODO: implement display mode change handling
-            return kIOReturnSuccess;
-
-        default:
-            IOLog("❓ notifyServer(): unhandled message = 0x%08X\n", message);
-            return kIOReturnUnsupported;
-    }
-}
 
 
 
@@ -2448,42 +1869,6 @@ IOReturn FakeIrisXEFramebuffer::getTimingInfoForDisplayMode(
 
 
 
-IOReturn FakeIrisXEFramebuffer::setCLUTWithEntries(IOColorEntry* colors,
-                                                   UInt32 firstIndex,
-                                                   UInt32 numEntries,
-                                                   IOOptionBits options) {
-    if (!colors || numEntries == 0 || firstIndex + numEntries > 256) {
-        return kIOReturnBadArgument;
-    }
-    
-    // Store color entries for software lookup table
-    if (!clutTable) {
-        clutTable = (IOColorEntry*)IOMalloc(256 * sizeof(IOColorEntry));
-        if (!clutTable) return kIOReturnNoMemory;
-    }
-    
-    for (UInt32 i = 0; i < numEntries; i++) {
-        clutTable[firstIndex + i] = colors[i];
-    }
-    
-    IOLog("✅ CLUT updated: %d entries starting at %d\n", numEntries, firstIndex);
-    return kIOReturnSuccess;
-}
-
-
-    
-
-IOReturn FakeIrisXEFramebuffer::setGammaTable(UInt32 ch, UInt32 count, UInt32 width, void *data) {
-  if (ch == 3 && width == 16 && count <= 256 && data) {
-    gamma.set = true;
-    bcopy(data, gamma.table, count*ch*sizeof(UInt16));
-    // Optional: program PIPE gamma LUT later; for now, accept.
-    return kIOReturnSuccess;
-  }
-  return kIOReturnUnsupported;
-}
-
-
 
 
 
@@ -2509,44 +1894,15 @@ IOReturn FakeIrisXEFramebuffer::getGammaTable(UInt32 channelCount,
 
 
 
-IOReturn FakeIrisXEFramebuffer::getAttributeForConnection(
-    IOIndex connect,
-    IOSelect attribute,
-    uintptr_t *value)
+
+
+
+
+const char* FakeIrisXEFramebuffer::getPixelFormats(void)
 {
-    if (connect != 0 || !value)
-        return kIOReturnBadArgument;
-
-    switch (attribute)
-    {
-        case kConnectionEnable:
-        case kConnectionDisable:
-        case kConnectionSupportsAppleSense:
-        case kConnectionSupportsLLDDCSense:
-        case kConnectionSupportsHLDDCSense:
-        case kConnectionSupportsDDCSense:
-        case kConnectionDisplayParameterCount:
-        case kConnectionFlags:
-        case kConnectionHandleDisplayConfig:
-        case kConnectionSupportsHotPlug:
-        case kConnectionPower:
-        case kConnectionIsOnline:
-            *value = 1;
-            return kIOReturnSuccess;
-
-        default:
-            *value = 0;
-            return kIOReturnSuccess;
-    }
-}
-
-
-
-
-
-
-const char* FakeIrisXEFramebuffer::getPixelFormats(void) {
-    return "ARGB8888";
+    // FIXED: Return "ARGB8888" null-terminated (CoreDisplay parses this)
+    static const char pixelFormats[] = "ARGB8888\0";
+    return pixelFormats;
 }
 
 
@@ -2567,7 +1923,7 @@ IOReturn FakeIrisXEFramebuffer::setCursorImage(void* cursorImage) {
     // Copy cursor data (assuming 32x32 ARGB cursor)
     bcopy(cursorImage, cursorBuffer, 32 * 32 * 4);
     
-    IOLog("✅ Cursor image updated\n");
+    IOLog("Cursor image updated\n");
     return kIOReturnSuccess;
 }
 
@@ -2637,93 +1993,6 @@ IOReturn FakeIrisXEFramebuffer::unregisterInterrupt(void* interruptRef) {
 
 
 
-IOReturn FakeIrisXEFramebuffer::createAccelTask(mach_port_t* port) {
-
-    return kIOReturnUnsupported;
-}
-
-
-
-
-
-void FakeIrisXEFramebuffer::publishDisplay() {
-    
-    if (!fullyInitialized) {
-         IOLog("publishDisplay called before full initialization\n");
-         return;
-     }
-    
-    IOLog("FakeIrisXEFramebuffer::publishDisplay() called\n");
-
-    
-    
-    if(displayPublished) return; // ✅ Prevent duplicates
-        displayPublished = true;
-    
-    IOService* display = new IOService;
-    if (display && display->init()) {
-        display->setName("display0");
-        display->setProperty("DisplayProductID", (uint32_t)0x717);
-        display->setProperty("DisplayVendorID", (uint32_t)0x756e6b6e); // 'unkn'
-        display->setProperty("IODisplayPrefsKey", "IOService:/AppleACPIPlatformExpert/PCI0@0/AppleACPIPCI/GFX0@2/display0");
-        display->setProperty("IOFBIsMainDisplay", kOSBooleanTrue);
-        display->setProperty("IODisplayIsActive", kOSBooleanTrue);
-        display->attach(this);
-        display->registerService();
-        display->release(); // ✅ prevent leak
-    }
-    else {
-            IOLog("❌ publishDisplay(): Failed to create or initialize childDisplay\n");
-            if (display) display->release();
-            return; // Exit if childDisplay failed
-        }
-    
-    
-    // CRITICAL FIX: Correctly build the IOFramebufferDisplays dictionary structure
-      OSDictionary* singleDisplayInfo = OSDictionary::withCapacity(1);
-      if (!singleDisplayInfo) {
-          IOLog("❌ publishDisplay(): Failed to create singleDisplayInfo dictionary\n");
-          return;
-      }
-      singleDisplayInfo->setObject("IODisplayPrefsKey", OSSymbol::withCString("IOService:/AppleACPIPlatformExpert/PCI0@0/AppleACPIPCI/GFX0@2/display0"));
-
-      OSArray* displayList = OSArray::withCapacity(1);
-      if (!displayList) {
-          IOLog("❌ publishDisplay(): Failed to create displayList array\n");
-          singleDisplayInfo->release();
-          return;
-      }
-      displayList->setObject(singleDisplayInfo); // Add the display info dictionary to the array
-
-      OSDictionary* fbDisplays = OSDictionary::withCapacity(1);
-      if (!fbDisplays) {
-          IOLog("❌ publishDisplay(): Failed to create fbDisplays dictionary\n");
-          singleDisplayInfo->release();
-          displayList->release();
-          return;
-      }
-      fbDisplays->setObject("display0", displayList); // Add the array to the main dictionary
-
-      setProperty("IOFramebufferDisplays", fbDisplays);
-
-      IOLog("publishDisplay(): display0 and IOFramebufferDisplays now published\n");
-
-      // Release local references (IOKit retains them)
-      singleDisplayInfo->release();
-      displayList->release();
-      fbDisplays->release();
-    
- //   deliverFramebufferNotification(0, kIOFBNotifyDisplayAdded, nullptr);
-   //     deliverFramebufferNotification(0, kIOFBNotifyDisplayModeChange, nullptr);
-     
-        IOLog("publishDisplay(): Sent immediate notifications\n");
-    
-    
-          }
-
-
-
-/*
 void FakeIrisXEFramebuffer::vsyncTimerFired(OSObject* owner, IOTimerEventSource* sender)
 {
     auto fb = OSDynamicCast(FakeIrisXEFramebuffer, owner);
@@ -2764,7 +2033,12 @@ void FakeIrisXEFramebuffer::vsyncOccurred(OSObject* owner, IOInterruptEventSourc
         fb->deliverFramebufferNotification(0, kIOFBVsyncNotification, nullptr);
     }
 
-*/
+
+
+
+
+
+
 
 
 
@@ -2779,17 +2053,6 @@ IOReturn FakeIrisXEFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex dep
         return kIOReturnSuccess;
     }
 
-
-
-IODeviceMemory* FakeIrisXEFramebuffer::getVRAMRange() {
-    if (!framebufferMemory) return nullptr;
-    
-    IOPhysicalAddress phys = framebufferMemory->getPhysicalAddress();
-    IOByteCount length = framebufferMemory->getLength();
-    
-    // MUST return a new IODeviceMemory object each time
-    return IODeviceMemory::withRange(phys, length);
-}
 
 
 
@@ -2832,13 +2095,15 @@ IOReturn FakeIrisXEFramebuffer::setBounds(IOIndex index, IOGBounds *bounds) {
 
 
 
-IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type,
-                                                    UInt32* flags,
-                                                    IOMemoryDescriptor** memory)
+
+
+IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type, UInt32* flags, IOMemoryDescriptor** memory)
 {
     IOLog("FakeIrisXEFramebuffer::clientMemoryForType() - type: %u\n", type);
 
-    // 1) Cursor memory (unchanged)
+    if (!memory) return kIOReturnBadArgument;
+
+    // FIXED: Handle ALL types with framebufferMemory (shared for main/VRAM/cursor)
     if (type == kIOFBCursorMemory && cursorMemory) {
         cursorMemory->retain();
         *memory = cursorMemory;
@@ -2846,23 +2111,17 @@ IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type,
         return kIOReturnSuccess;
     }
 
-    // 2) System aperture: just give the IOBufferMemoryDescriptor we actually render into
-    if (type == kIOFBSystemAperture && framebufferMemory) {
+    if (framebufferMemory) {
         framebufferMemory->retain();
         *memory = framebufferMemory;
         if (flags) *flags = 0;
-        IOLog("clientMemoryForType: returning framebufferMemory for kIOFBSystemAperture\n");
+        IOLog("clientMemoryForType: returning framebufferMemory for type %u\n", type);
         return kIOReturnSuccess;
-    }
-
-    // 3) TEMP: don’t expose separate VRAM memory yet
-    if (type == kIOFBVRAMMemory) {
-        IOLog("clientMemoryForType: kIOFBVRAMMemory -> unsupported (temp)\n");
-        return kIOReturnUnsupported;
     }
 
     return kIOReturnUnsupported;
 }
+
 
 
 
@@ -2880,11 +2139,8 @@ IOReturn FakeIrisXEFramebuffer::performFlushNow()
     if (!dst)
         return kIOReturnError;
 
-    uint32_t *p = (uint32_t *)dst;
-    uint32_t pixels = 1920 * 1080;
 
     OSMemoryBarrier();
-    (void) safeMMIORead(PLANE_CTL_1_A);
 
     IOLog("FakeIrisXEFB::performFlushNow(): done\n");
     return kIOReturnSuccess;
@@ -2930,7 +2186,7 @@ IOReturn FakeIrisXEFramebuffer::flushDisplay(void)
 
 
 
-/*
+
 void FakeIrisXEFramebuffer::deliverFramebufferNotification(IOIndex index, UInt32 event, void* info) {
     IOLog("📩 deliverFramebufferNotification() index=%u event=0x%08X\n", index, event);
     
@@ -2947,7 +2203,6 @@ void FakeIrisXEFramebuffer::deliverFramebufferNotification(IOIndex index, UInt32
             break;
     }
 }
-  */
 
 
 
@@ -2955,8 +2210,6 @@ void FakeIrisXEFramebuffer::deliverFramebufferNotification(IOIndex index, UInt32
 
 IOReturn FakeIrisXEFramebuffer::setNumberOfDisplays(UInt32 count)
 {
-    
-    
     IOLog("setNumberOfDisplays(%u)\n", count);
     return kIOReturnSuccess;
 }
@@ -2966,14 +2219,20 @@ IOReturn FakeIrisXEFramebuffer::setNumberOfDisplays(UInt32 count)
 
 
 
-IOReturn FakeIrisXEFramebuffer::setPowerState(unsigned long powerStateOrdinal, IOService* whatDevice) {
-    IOLog("setPowerState() called: %lu. (V26: Doing nothing.)\n", (unsigned long)powerStateOrdinal);
-    
-    // We do *not* want to do *anything* here.
-    // Power is handled by our timer.
-    
-    return IOPMAckImplied;
+
+
+
+IOReturn FakeIrisXEFramebuffer::setPowerState(unsigned long state,
+                                              IOService* whatDevice)
+{
+    IOLog("[FakeIrisXEFramebuffer] setPowerState(%lu)\n", state);
+    return super::setPowerState(state, whatDevice);
 }
+
+
+
+
+
 
 
 
@@ -3020,29 +2279,32 @@ IOReturn FakeIrisXEFramebuffer::getPixelInformation(
     IOPixelAperture aperture,
     IOPixelInformation *info)
 {
-    if (!info || mode != 0 || aperture != kIOFBSystemAperture)
+    if (!info || mode != 0 || aperture != kIOFBSystemAperture || depth != 32)
         return kIOReturnBadArgument;
 
     IOLog("getPixelInformation()\n");
 
     bzero(info, sizeof(IOPixelInformation));
 
-    info->pixelType        = kIO32ARGBPixelFormat;
-    info->pixelFormat[0]   = 'A';
-    info->pixelFormat[1]   = 'R';
-    info->pixelFormat[2]   = '2';
-    info->pixelFormat[3]   = '4';
+    info->pixelType = kIO32ARGBPixelFormat;
+    // FIXED: Use "ARGB8888" for 32bpp (null-terminated string)
+    strlcpy(info->pixelFormat, "ARGB8888", sizeof(info->pixelFormat));
 
     info->bitsPerComponent = 8;
-    info->bitsPerPixel     = 32;
-    info->componentCount   = 4;
-    info->bytesPerRow      = 1920 * 4;
-    info->activeWidth      = 1920;
-    info->activeHeight     = 1080;
+    info->bitsPerPixel = 32;
+    info->componentCount = 4;
+    info->bytesPerRow = 1920 * 4;
+    info->activeWidth = 1920;
+    info->activeHeight = 1080;
+
+    // FIXED: Add masks for ARGB8888 (CoreDisplay expects them for parse)
+    info->componentMasks[0] = 0xFF000000;  // A
+    info->componentMasks[1] = 0x00FF0000;  // R
+    info->componentMasks[2] = 0x0000FF00;  // G
+    info->componentMasks[3] = 0x000000FF;  // B
 
     return kIOReturnSuccess;
 }
-
 
 
 
@@ -3055,29 +2317,36 @@ IOIndex FakeIrisXEFramebuffer::getAperture() const {
 
 
 
-
 IODeviceMemory* FakeIrisXEFramebuffer::getApertureRange(IOPixelAperture aperture)
 {
     IOLog("getApertureRange(aperture = %d)\n", aperture);
 
-    
-    IOPhysicalAddress phys = framebufferMemory->getPhysicalAddress();
-    IOByteCount      len  = framebufferMemory->getLength();
+    if (!framebufferMemory) {
+        IOLog("❌ No framebuffer for aperture\n");
+        return nullptr;
+    }
 
-    // NEW object each time, as IOFramebuffer expects
+    IOPhysicalAddress phys = framebufferMemory->getPhysicalAddress();
+    IOByteCount len = framebufferMemory->getLength();
+
+    // FIXED: Handle VRAM/cursor with same memory (no duplicate cases, no undeclared enum)
+    if (aperture == kIOFBVRAMMemory) {
+        IOLog("getApertureRange: VRAM aperture — using shared FB memory\n");
+    } else if (aperture != kIOFBSystemAperture) {
+        IOLog("⚠️ Unsupported aperture %d — falling back to system\n", aperture);
+    }
+
+    // NEW object each time
     IODeviceMemory *mem = IODeviceMemory::withRange(phys, len);
     if (!mem) {
         IOLog("getApertureRange: IODeviceMemory::withRange failed\n");
         return nullptr;
     }
 
-    IOLog("getApertureRange: phys=0x%llx len=0x%llx\n",
-          (unsigned long long)phys,
-          (unsigned long long)len);
+    IOLog("getApertureRange: phys=0x%llx len=0x%llx for aperture %d\n",
+          (unsigned long long)phys, (unsigned long long)len, aperture);
     return mem;
 }
-
-
 
 
 
@@ -3105,45 +2374,31 @@ IOReturn FakeIrisXEFramebuffer::getFramebufferOffsetForX_Y(IOPixelAperture apert
 
 
 
-
-
-
-IOReturn FakeIrisXEFramebuffer::setMode(IODisplayModeID displayMode, IOOptionBits options, UInt32 depth) {
-    IOLog("FakeIrisXEFramebuffer::setMode() CALLED! Mode ID: %u, Options: 0x%x, Depth: %u\n", displayMode, options, depth);
-
-
-    currentMode = displayMode;
-    currentDepth = depth;
-
-    if (depth == 32) {
-        setProperty("IOFBCurrentPixelFormat", OSString::withCString("ARGB8888"));
-    }
-
-    return kIOReturnSuccess;
-}
-
-
-
-
 IOReturn FakeIrisXEFramebuffer::getInformationForDisplayMode(
     IODisplayModeID mode,
     IODisplayModeInformation* info)
 {
-
     IOLog("getInformationForDisplayMode() CALLED for mode = %d\n", mode);
+
+    if (!info || mode != 0) {
+        IOLog("Invalid info pointer or mode not supported\n");
+        return kIOReturnUnsupportedMode;
+    }
 
     bzero(info, sizeof(IODisplayModeInformation));
     info->maxDepthIndex = 0;
-    info->nominalWidth  = 1920;
+    info->nominalWidth = 1920;
     info->nominalHeight = 1080;
-    info->refreshRate   = (60 << 16); // 60Hz
+    info->refreshRate = (60 << 16); // 60Hz fixed-point
 
-    info->reserved[0] = kIOTimingIDDefault;
-    info->reserved[1] = 0;
+    // FIXED: Set reserved[0] = timingID, reserved[1] = flags (CoreDisplay expects this)
+    info->reserved[0] = kIOTimingIDDefault;  // Timing ID
+    info->reserved[1] = kIOTimingInfoValid_AppleTimingID;  // Flags (0x1) — was 0, causing NSNumber parse error
+
+    IOLog("Returning display mode info: 1920x1080 @ 60Hz\n");
 
     return kIOReturnSuccess;
 }
-
 
 
 
@@ -3164,103 +2419,149 @@ UInt32 FakeIrisXEFramebuffer::getConnectionCount() {
 
 
 
-IOReturn FakeIrisXEFramebuffer::setAttribute(IOSelect attribute, uintptr_t value)
-{
-    IOLog("setAttribute(0x%08X, 0x%08lX)\n", attribute, value);
-    
-    switch (attribute) {
-        case kIOCaptureAttribute:
-            IOLog("WindowServer capture request - accepting\n");
-            return kIOReturnSuccess;
-            
-        case kIOPowerAttribute:
-            IOLog("Power attribute change - accepting\n");
-            return kIOReturnSuccess;
-            
-        default:
-            IOLog("Unhandled setAttribute: 0x%08X\n", attribute);
-            return kIOReturnUnsupported;
-    }
-}
-
-
-
-
-
-
-IOReturn FakeIrisXEFramebuffer::getAttribute(IOSelect attr, uintptr_t *value) {
-  switch (attr) {
-    case kIOHardwareCursorAttribute: if (value) *value = 0; return kIOReturnSuccess;
-    case kIOVRAMSaveAttribute:       if (value) *value = 0; return kIOReturnSuccess;
-      case kIOPowerAttribute:          if (value) *value = kIOPMPowerOn; return kIOReturnSuccess;
-  }
-  return super::getAttribute(attr, value);
-}
-
-
-
-
-
-
 IOReturn FakeIrisXEFramebuffer::getAttributeForIndex(IOSelect attribute, UInt32 index, UInt32* value) {
     IOLog("getAttributeForIndex(%u, %u)\n", attribute, index);
 
-    if (!value) return kIOReturnBadArgument;
-
-    switch (attribute) {
-        case kIOPowerAttribute:
-        case kIOSystemPowerAttribute:
-            *value = 1; // Always "on"
             return kIOReturnSuccess;
+    
+}
 
-        default:
-            *value = 0;
-            return kIOReturnSuccess;
+
+
+
+
+IOReturn FakeIrisXEFramebuffer::getNotificationSemaphore(
+    IOSelect event,
+                                                         semaphore **sem)
+{
+    IOLog("getNotificationSemaphore called\n");
+    if (sem) *sem = nullptr;
+    return kIOReturnUnsupported;
+}
+
+IOReturn FakeIrisXEFramebuffer::setCLUTWithEntries(
+    IOColorEntry *entries,
+    SInt32 index,
+    SInt32 numEntries,
+    IOOptionBits options)
+{
+    IOLog("setCLUTWithEntries called\n");
+    return kIOReturnSuccess;
+}
+
+IOReturn FakeIrisXEFramebuffer::setGammaTable(
+    UInt32 channelCount,
+    UInt32 dataCount,
+    UInt32 dataWidth,
+    void *data)
+{
+    IOLog("setGammaTable (compat) called\n");
+    return kIOReturnSuccess;
+}
+
+
+
+IOReturn FakeIrisXEFramebuffer::setAttribute(
+    IOSelect attribute,
+    uintptr_t value)
+{
+    IOLog("setAttribute compat\n");
+    return super::setAttribute(attribute,value);
+}
+
+
+
+
+
+
+
+
+IOReturn FakeIrisXEFramebuffer::getAttribute(
+    IOSelect attribute,
+    uintptr_t *value)
+{
+    if (value) {
+        switch (attribute) {
+            case kIOPowerAttribute:
+            case kIOSystemPowerAttribute:
+                *value = kIOPMPowerOn;
+                break;
+            default:
+                *value = 0;
+                break;
+        }
     }
-}
-
-
-
-IOReturn FakeIrisXEFramebuffer::setProperties(OSObject* properties) {
-    IOLog("setProperties()\n");
+    // Don’t forward to super; just say “OK”.
     return kIOReturnSuccess;
 }
 
-IOReturn FakeIrisXEFramebuffer::validateDetailedTiming(void* desc, UInt32* score) {
-    IOLog("validateDetailedTiming()\n");
-    if (score) *score = 0;
+
+
+
+
+
+IOReturn FakeIrisXEFramebuffer::getAttributeForConnection(
+    IOIndex connect,
+    IOSelect attribute,
+    uintptr_t *value)
+{
+    IOLog("[FakeIrisXEFramebuffer] getAttributeForConnection(conn=%u, attr=0x%08x)\n",
+          (unsigned)connect, (unsigned)attribute);
+
+    if (value) {
+        // Default everything to 0 for now
+        *value = 0;
+    }
+
+    // Don’t ever call super here. Just say “OK, here’s 0”.
     return kIOReturnSuccess;
 }
 
-IOReturn FakeIrisXEFramebuffer::setDetailedTimings(OSObject* params) {
-    IOLog("setDetailedTimings()\n");
-    return kIOReturnUnsupported;
-}
+IOReturn FakeIrisXEFramebuffer::setAttributeForConnection(
+    IOIndex connect,
+    IOSelect attribute,
+    uintptr_t value)
+{
+    IOLog("[FakeIrisXEFramebuffer] setAttributeForConnection(conn=%u, attr=0x%08x, value=0x%lx)\n",
+          (unsigned)connect, (unsigned)attribute, (unsigned long)value);
 
-IOReturn FakeIrisXEFramebuffer::setInterruptState(void* ref, UInt32 state) {
-    IOLog("setInterruptState(state=%u)\n", state);
+    // Ignore everything for now and don’t touch hardware / properties here.
     return kIOReturnSuccess;
 }
 
-IOReturn FakeIrisXEFramebuffer::handleEvent(IOFramebuffer* fb, void* ref, UInt32 event, void* info) {
-    IOLog("handleEvent(event=%u)\n", event);
-    return kIOReturnUnsupported;
+
+
+
+IOReturn FakeIrisXEFramebuffer::setBackingStoreState(
+    IODisplayModeID mode,
+    IOOptionBits options)
+{
+    IOLog("setBackingStoreState\n");
+    return kIOReturnSuccess;
 }
 
-IOReturn FakeIrisXEFramebuffer::doControl(UInt32 command, void* params, UInt32 size) {
-    IOLog("doControl(cmd=%u, size=%u)\n", command, size);
-    return kIOReturnUnsupported;
+IOReturn FakeIrisXEFramebuffer::setStartupDisplayMode(
+    IODisplayModeID mode,
+    IOIndex depth)
+{
+    IOLog("setStartupDisplayMode\n");
+    return kIOReturnSuccess;
 }
 
-IOReturn FakeIrisXEFramebuffer::extControl(OSObject* params) {
-    IOLog("extControl()\n");
-    return kIOReturnUnsupported;
+
+IOReturn FakeIrisXEFramebuffer::waitForAcknowledge(
+    IOIndex connect,
+    UInt32 type,
+    void *info)
+{
+    IOLog("waitForAcknowledge called\n");
+    return kIOReturnSuccess;
 }
 
-void FakeIrisXEFramebuffer::transformLocation(IOGPoint* loc, IOOptionBits options) {
-    IOLog("transformLocation(%d, %d)\n", loc->x, loc->y);
-    // No transformation needed
-}
+
+
+
+
 
 
 
