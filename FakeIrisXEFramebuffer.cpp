@@ -87,8 +87,6 @@ using namespace libkern;
 #define MAKE_IOVRAM_RANGE_INDEX(index) ((UInt32)(index))
 #define kIOFBMemoryCountKey   "IOFBMemoryCount"
 
-#define kIOFBVRAMMemory 0
-#define kIOFBCursorMemory 1
 
 // Connection flag values
 #define kIOConnectionBuiltIn            0x00000100
@@ -568,7 +566,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
-
+/*
     // === GPU Acceleration Properties ===
     {
         // Required properties for Quartz Extreme / Core Animation
@@ -586,17 +584,13 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
   
 
     
-    
-    
-    
-    
     //display bounds
     OSDictionary* bounds = OSDictionary::withCapacity(2);
     bounds->setObject("Height", OSNumber::withNumber(1080, 32));
     bounds->setObject("Width", OSNumber::withNumber(1920, 32));
     setProperty("IOFramebufferBounds", bounds);
     bounds->release();
-
+*/
     
     
     
@@ -829,7 +823,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     }
 
     
-    
+    /*
     
     // Setup vsyncTimer for screen refresh (simulation only)
     if (workLoop && !isInactive()) {  // Add safety check
@@ -846,21 +840,16 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
             }
         }
     }
-
+*/
      
     
     
     
     
-    
-    setProperty("IOFBWidth",  1920ULL);
-    setProperty("IOFBHeight", 1080ULL);
-    setProperty("IOFBDepth",  32, 32);
-    setProperty("IOFBBytesPerRow", 1920 * 4, 32);
+
     setProperty("IOFBMemorySize", framebufferMemory->getLength(), 32);
     setProperty("IOFBOnline", kOSBooleanTrue);
     setProperty("IOFBDisplayModeCount", (uint64_t)1, 32);
-    setProperty("IOFBPixelFormat", "AR24");
     setProperty("IOFBIsMainDisplay", kOSBooleanTrue);
     setProperty("AAPL,boot-display", kOSBooleanTrue);
 
@@ -880,6 +869,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
         cursorMemory->release();
     }
 
+
     
     
     OSNumber* cursorSizeNum = OSNumber::withNumber(32ULL, 32); // Renamed variable to avoid conflict
@@ -894,16 +884,17 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
        }
   
 
+
+    
+    
+    
     
     
     
     
     setNumberOfDisplays(1);
-    setDisplayMode(0, 0);
 
-    
-    
-    
+
     
     fullyInitialized = true;
     driverActive = true;
@@ -942,41 +933,12 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
   
     // 6. Then flush and notify
     flushDisplay();
-
-    
-    
-    
-    IOLog("---- PCI BAR DUMP ----\n");
-
-    uint32_t count = pciDevice->getDeviceMemoryCount();
-    IOLog("DeviceMemoryCount = %u\n", count);
-
-    for (uint32_t i = 0; i < count; i++) {
-        IODeviceMemory* mem = pciDevice->getDeviceMemoryWithIndex(i);
-        if (!mem) continue;
-
-        IOPhysicalAddress phys = mem->getPhysicalAddress();
-        uint64_t length = mem->getLength();
-
-        IOLog("BAR %u: phys=0x%llX len=0x%llX\n",
-              i,
-              (unsigned long long)phys,
-              (unsigned long long)length);
-    }
-
-    
-
-    
-    
-    IOLog("---- PCI GTTMMADR dump ----\n");
-
-    IOLog("PCI GTTMMADR low = 0x%08X\n", pciDevice->configRead32(0x18));
-    IOLog("PCI GTTMMADR hi  = 0x%08X\n", pciDevice->configRead32(0x1C));
-
     
     
     // 6. Finally, publish the framebuffer
     attachToParent(getProvider(), gIOServicePlane);
+    
+    
     
     
     registerService();
@@ -1268,7 +1230,7 @@ void FakeIrisXEFramebuffer::activatePowerAndController() {
     
     
     
-    //displayOnline = true;
+    displayOnline = true;
 
     
     IOLog("Delayed power and display activation complete\n");
@@ -1846,26 +1808,28 @@ bool FakeIrisXEFramebuffer::getIsUsable() const {
 
 
 
+
 IOReturn FakeIrisXEFramebuffer::getTimingInfoForDisplayMode(
     IODisplayModeID displayMode,
     IOTimingInformation* infoOut)
 {
-    if (!infoOut || displayMode != 0) {
+    if (!infoOut || displayMode != 1) {   // <-- mode 1
         return kIOReturnUnsupportedMode;
     }
-    
+
     bzero(infoOut, sizeof(IOTimingInformation));
-    
-    // Proper 1920x1080@60Hz timing
+
     infoOut->appleTimingID = kIOTimingIDDefault;
-    infoOut->flags = kIOTimingInfoValid_AppleTimingID;
+    infoOut->flags         = kIOTimingInfoValid_AppleTimingID;
+
     infoOut->detailedInfo.v1.horizontalActive = 1920;
-    infoOut->detailedInfo.v1.verticalActive = 1080;
-    infoOut->detailedInfo.v1.pixelClock = 148500000; // 148.5 MHz for 1080p60
-    
-    
+    infoOut->detailedInfo.v1.verticalActive   = 1080;
+    infoOut->detailedInfo.v1.pixelClock       = 148500000; // 148.5 MHz 1080p60
+
     return kIOReturnSuccess;
 }
+
+
 
 
 
@@ -1991,7 +1955,7 @@ IOReturn FakeIrisXEFramebuffer::unregisterInterrupt(void* interruptRef) {
 
 
 
-
+/*
 
 void FakeIrisXEFramebuffer::vsyncTimerFired(OSObject* owner, IOTimerEventSource* sender)
 {
@@ -2033,25 +1997,30 @@ void FakeIrisXEFramebuffer::vsyncOccurred(OSObject* owner, IOInterruptEventSourc
         fb->deliverFramebufferNotification(0, kIOFBVsyncNotification, nullptr);
     }
 
+*/
 
 
 
 
 
 
+IOReturn FakeIrisXEFramebuffer::setDisplayMode(IODisplayModeID mode,
+                                               IOIndex depth)
+{
+    IOLog("setDisplayMode(mode=%u, depth=%u)\n", mode, depth);
 
-
-
-IOReturn FakeIrisXEFramebuffer::setDisplayMode(IODisplayModeID mode, IOIndex depth) {
-    
-    if (mode != 0) return kIOReturnUnsupportedMode;  // Allow mode 0
-        if (depth != 0 && depth != 32) return kIOReturnUnsupportedMode;  // Allow depth 0 or 32
-        
-        currentMode = mode;
-        currentDepth = depth;
-        
-        return kIOReturnSuccess;
+    // We only support mode 1, depth index 0
+    if (mode != 1 || depth != 0) {
+        IOLog("setDisplayMode: unsupported mode/depth\n");
+        return kIOReturnUnsupportedMode;
     }
+
+    currentMode  = mode;
+    currentDepth = depth;
+    return kIOReturnSuccess;
+}
+
+
 
 
 
@@ -2245,18 +2214,23 @@ IOItemCount FakeIrisXEFramebuffer::getDisplayModeCount(void)
 }
 
 
-IOReturn FakeIrisXEFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes) {
-    if (allDisplayModes)
-        allDisplayModes[0] = 0;
-    
+
+
+
+IOReturn FakeIrisXEFramebuffer::getDisplayModes(IODisplayModeID *allDisplayModes)
+{
     if (!allDisplayModes) {
         IOLog("getDisplayModes(): null pointer\n");
-        return kIOReturnSuccess;
+        return kIOReturnBadArgument;
     }
 
-    
+    // Our single mode has ID 1
+    allDisplayModes[0] = 1;
+    IOLog("getDisplayModes(): returning modeID=1\n");
     return kIOReturnSuccess;
 }
+
+
 
 
 
@@ -2265,10 +2239,14 @@ UInt64 FakeIrisXEFramebuffer::getPixelFormatsForDisplayMode(
 {
     IOLog("getPixelFormatsForDisplayMode(mode=%u depth=%u)\n", mode, depth);
 
-    return (1ULL << 0);   // Only 1 format index
+    // Only support our single mode / depth
+    if (mode != 1 || depth != 0)
+        return 0;
+
+    // Bit 0 -> first pixel format from getPixelFormats()
+    // (your getPixelFormats() returns "ARGB8888\0")
+    return (1ULL << 0);
 }
-
-
 
 
 
@@ -2279,25 +2257,32 @@ IOReturn FakeIrisXEFramebuffer::getPixelInformation(
     IOPixelAperture aperture,
     IOPixelInformation *info)
 {
-    if (!info || mode != 0 || aperture != kIOFBSystemAperture || depth != 32)
+    // IMPORTANT: must match mode/depth we advertise elsewhere
+    if (!info ||
+        mode != 1 ||          // NOT 0
+        depth != 0 ||         // depth index 0
+        aperture != kIOFBSystemAperture)
+    {
+        IOLog("getPixelInformation(): bad args (mode=%u depth=%u ap=%u)\n",
+              mode, depth, (unsigned)aperture);
         return kIOReturnBadArgument;
+    }
 
     IOLog("getPixelInformation()\n");
 
     bzero(info, sizeof(IOPixelInformation));
 
     info->pixelType = kIO32ARGBPixelFormat;
-    // FIXED: Use "ARGB8888" for 32bpp (null-terminated string)
+    // Matches your “ARGB8888” pixel format and ARGB ordering
     strlcpy(info->pixelFormat, "ARGB8888", sizeof(info->pixelFormat));
 
     info->bitsPerComponent = 8;
-    info->bitsPerPixel = 32;
-    info->componentCount = 4;
-    info->bytesPerRow = 1920 * 4;
-    info->activeWidth = 1920;
-    info->activeHeight = 1080;
+    info->bitsPerPixel     = 32;
+    info->componentCount   = 4;
+    info->bytesPerRow      = 1920 * 4;
+    info->activeWidth      = 1920;
+    info->activeHeight     = 1080;
 
-    // FIXED: Add masks for ARGB8888 (CoreDisplay expects them for parse)
     info->componentMasks[0] = 0xFF000000;  // A
     info->componentMasks[1] = 0x00FF0000;  // R
     info->componentMasks[2] = 0x0000FF00;  // G
@@ -2310,36 +2295,71 @@ IOReturn FakeIrisXEFramebuffer::getPixelInformation(
 
 
 
-
 IOIndex FakeIrisXEFramebuffer::getAperture() const {
     return kIOFBSystemAperture;
 }
 
 
 
+
+
+
+
+
+// Legacy overload (keep for console/PE_Video — your code is perfect)
+IOReturn FakeIrisXEFramebuffer::getApertureRange(IOSelect aperture,
+                                                 IOPhysicalAddress *phys,
+                                                 IOByteCount *length)
+{
+    IOLog("getApertureRange(old) aperture=%u\n", (unsigned)aperture);
+
+    if (!phys || !length || !framebufferMemory)
+        return kIOReturnBadArgument;
+
+    IOByteCount segLen = 0;
+    IOPhysicalAddress firstPhys =
+        framebufferMemory->getPhysicalSegment(0, &segLen);
+
+    if (!firstPhys)
+        return kIOReturnError;
+
+    *phys = firstPhys;
+    *length = framebufferMemory->getLength();
+
+    IOLog(" → phys=0x%llx len=0x%llx segLen=0x%llx\n",
+          (uint64_t)*phys, (uint64_t)*length, (uint64_t)segLen);
+
+    return kIOReturnSuccess;
+}
+
+
+#define kIOFBVRAMMemory 1
+// FIXED New overload (override fully — return shared for all apertures, no super)
 IODeviceMemory* FakeIrisXEFramebuffer::getApertureRange(IOPixelAperture aperture)
 {
-    IOLog("getApertureRange(aperture = %d)\n", aperture);
+    IOLog("getApertureRange(new) aperture=%d\n", aperture);
 
     if (!framebufferMemory) {
-        IOLog("❌ No framebuffer for aperture\n");
+        IOLog("❌ No framebuffer for aperture %d\n", aperture);
         return nullptr;
     }
 
     IOPhysicalAddress phys = framebufferMemory->getPhysicalAddress();
     IOByteCount len = framebufferMemory->getLength();
 
-    // FIXED: Handle VRAM/cursor with same memory (no duplicate cases, no undeclared enum)
-    if (aperture == kIOFBVRAMMemory) {
-        IOLog("getApertureRange: VRAM aperture — using shared FB memory\n");
+    // FIXED: Return shared memory for ALL apertures (WS FB 2 needs VRAM/cursor)
+    if (aperture == kIOFBVRAMMemory || aperture == 1) {  // VRAM = 1
+        IOLog("getApertureRange: VRAM aperture — using shared FB\n");
+    } else if (aperture == 2) {  // Cursor aperture
+        IOLog("getApertureRange: Cursor aperture — using shared FB\n");
     } else if (aperture != kIOFBSystemAperture) {
-        IOLog("⚠️ Unsupported aperture %d — falling back to system\n", aperture);
+        IOLog("⚠️ Unsupported aperture %d — fallback to system\n", aperture);
     }
 
-    // NEW object each time
+    // Create and return new IODeviceMemory (WS expects fresh each call)
     IODeviceMemory *mem = IODeviceMemory::withRange(phys, len);
     if (!mem) {
-        IOLog("getApertureRange: IODeviceMemory::withRange failed\n");
+        IOLog("getApertureRange: withRange failed\n");
         return nullptr;
     }
 
@@ -2353,24 +2373,34 @@ IODeviceMemory* FakeIrisXEFramebuffer::getApertureRange(IOPixelAperture aperture
 
 
 
+
+
+
 IOReturn FakeIrisXEFramebuffer::getFramebufferOffsetForX_Y(IOPixelAperture aperture,
                                                            SInt32 x,
                                                            SInt32 y,
                                                            UInt32 *offset)
 {
-    if (!offset || aperture != kIOFBSystemAperture)
+    if (!offset)
         return kIOReturnBadArgument;
 
-    // 1920x1080 ARGB8888, linear
+    IOLog("getFramebufferOffsetForX_Y(aperture=%d, x=%d, y=%d)\n",
+          (int)aperture, (int)x, (int)y);
+
     const UInt32 bytesPerPixel = 4;
     const UInt32 width         = 1920;
+    const UInt32 height        = 1080;
 
-    if (x < 0 || y < 0 || x >= (SInt32)width || y >= 1080)
+    if (x < 0 || y < 0 || x >= (SInt32)width || y >= (SInt32)height) {
+        IOLog("getFramebufferOffsetForX_Y: out of range\n");
         return kIOReturnBadArgument;
+    }
 
     *offset = (y * width + x) * bytesPerPixel;
     return kIOReturnSuccess;
 }
+
+
 
 
 
@@ -2380,35 +2410,45 @@ IOReturn FakeIrisXEFramebuffer::getInformationForDisplayMode(
 {
     IOLog("getInformationForDisplayMode() CALLED for mode = %d\n", mode);
 
-    if (!info || mode != 0) {
+    if (!info || mode != 1) {   // <-- mode 1, not 0
         IOLog("Invalid info pointer or mode not supported\n");
         return kIOReturnUnsupportedMode;
     }
 
     bzero(info, sizeof(IODisplayModeInformation));
-    info->maxDepthIndex = 0;
-    info->nominalWidth = 1920;
-    info->nominalHeight = 1080;
-    info->refreshRate = (60 << 16); // 60Hz fixed-point
 
-    // FIXED: Set reserved[0] = timingID, reserved[1] = flags (CoreDisplay expects this)
-    info->reserved[0] = kIOTimingIDDefault;  // Timing ID
-    info->reserved[1] = kIOTimingInfoValid_AppleTimingID;  // Flags (0x1) — was 0, causing NSNumber parse error
+    info->maxDepthIndex = 0;           // one depth index
+    info->nominalWidth  = 1920;
+    info->nominalHeight = 1080;
+    info->refreshRate   = (60 << 16);  // 60 Hz fixed-point
+
+    // CoreDisplay expects these for timing lookup
+    info->reserved[0] = kIOTimingIDDefault;
+    info->reserved[1] = kIOTimingInfoValid_AppleTimingID;
 
     IOLog("Returning display mode info: 1920x1080 @ 60Hz\n");
-
     return kIOReturnSuccess;
 }
 
 
 
-IOReturn FakeIrisXEFramebuffer::getStartupDisplayMode(IODisplayModeID *modeID, IOIndex *depth)
+
+
+
+
+
+
+IOReturn FakeIrisXEFramebuffer::getStartupDisplayMode(IODisplayModeID *modeID,
+                                                      IOIndex *depth)
 {
     IOLog("getStartupDisplayMode() called\n");
-    if (modeID) *modeID = 0; // Not 1!
-    if (depth)  *depth  = 0;
+    if (modeID) *modeID = 1;   // MUST match getDisplayModes()
+    if (depth)  *depth  = 0;   // depth index 0 (we’ll treat as 32-bpp)
     return kIOReturnSuccess;
 }
+
+
+
 
 
 
@@ -2499,7 +2539,6 @@ IOReturn FakeIrisXEFramebuffer::getAttribute(
 
 
 
-
 IOReturn FakeIrisXEFramebuffer::getAttributeForConnection(
     IOIndex connect,
     IOSelect attribute,
@@ -2508,14 +2547,47 @@ IOReturn FakeIrisXEFramebuffer::getAttributeForConnection(
     IOLog("[FakeIrisXEFramebuffer] getAttributeForConnection(conn=%u, attr=0x%08x)\n",
           (unsigned)connect, (unsigned)attribute);
 
-    if (value) {
-        // Default everything to 0 for now
-        *value = 0;
-    }
+    if (!value)
+        return kIOReturnBadArgument;
 
-    // Don’t ever call super here. Just say “OK, here’s 0”.
-    return kIOReturnSuccess;
+    // Default
+    *value = 0;
+
+    switch (attribute) {
+        // ---- Capabilities ----
+        case kConnectionSupportsAppleSense:     // 'cena' / sense support
+        case kConnectionSupportsDDCSense:
+        case kConnectionSupportsHLDDCSense:
+        case kConnectionSupportsLLDDCSense:    // 'lddc'
+        case kConnectionSupportsHotPlug:
+            *value = 1;   // yes, supported
+            return kIOReturnSuccess;
+
+        // ---- Parameter count ----
+        case kConnectionDisplayParameterCount:  // 'pcnt'
+            *value = 1;   // at least one param
+            return kIOReturnSuccess;
+
+        // ---- Connection flags (built-in DP) ----
+        case kConnectionFlags:
+            *value = kIOConnectionBuiltIn | kIOConnectionDisplayPort;
+            return kIOReturnSuccess;
+
+        // ---- Online / enabled ----
+        case kConnectionIsOnline:              // 'ionl' if asked
+            *value = 1;   // panel is online
+            return kIOReturnSuccess;
+
+        default:
+            // For unknown attributes, just say “no info”
+            *value = 0;
+            return kIOReturnSuccess;
+    }
 }
+
+
+
+
 
 IOReturn FakeIrisXEFramebuffer::setAttributeForConnection(
     IOIndex connect,
@@ -2557,16 +2629,6 @@ IOReturn FakeIrisXEFramebuffer::waitForAcknowledge(
     IOLog("waitForAcknowledge called\n");
     return kIOReturnSuccess;
 }
-
-
-
-
-
-
-
-
-
-
 
 
 #include <libkern/libkern.h> // For kern_return_t, kmod_info_t
