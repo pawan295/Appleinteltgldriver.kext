@@ -8,6 +8,15 @@
 #include <IOKit/IOTimerEventSource.h>
 #include <IOKit/IOWorkLoop.h>
 
+#include "FakeIrisXEGEM.hpp"
+#include "FakeIrisXERing.h"
+#include "i915_reg.h"
+
+#include "FakeIrisXEExeclist.hpp"
+
+
+
+
 // Forward-declare the framebuffer class
 class FakeIrisXEFramebuffer;
 
@@ -178,6 +187,21 @@ public:
     
     
     
+    FakeIrisXEFramebuffer* fFramebuffer = nullptr;
+
+    bool submitGpuBatchForCtx(uint32_t ctxId,
+                                                     FakeIrisXEGEM* batchGem,
+                                                     uint32_t priority);
+    
+    
+    FakeIrisXEFramebuffer* getFramebufferOwner() { return fFB; }
+
+    
+    FakeIrisXEExeclist* fExeclistFromFB = nullptr;
+    FakeIrisXERing*     fRcsRingFromFB  = nullptr;
+
+    void linkFromFramebuffer(FakeIrisXEFramebuffer* fb);
+
     
 private:
   
@@ -220,6 +244,14 @@ private:
     OSArray* fContexts {nullptr};
     IOLock* fCtxLock {nullptr};
     uint32_t                  fNextCtxId {1};
+    
+private:
+    FakeIrisXEExeclist* fExeclist = nullptr;
+    FakeIrisXERing*     fRcsRing = nullptr;
+
+    
+    
+    
 };
 
 
