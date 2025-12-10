@@ -1,209 +1,301 @@
 #include "FakeIrisXEAcceleratorUserClient.hpp"
 #include "FakeIrisXEAccelerator.hpp"
-#include "FakeIrisXEAccelShared.h"
-
+#include "FakeIrisXEGEM.hpp"
 #include <IOKit/IOLib.h>
+#include <libkern/c++/OSSymbol.h>
+#include "FakeIrisXEFramebuffer.hpp"
+#include "FakeIrisXEAccelShared.h"   // for kFakeIris_Method_SubmitExeclistFenceTest
 
-OSDefineMetaClassAndStructors(FakeIrisXEAcceleratorUserClient, IOUserClient);
 
-// initWithTask - kernel correct signature
-bool FakeIrisXEAcceleratorUserClient::initWithTask(task_t owningTask, void* securityID, UInt32 type)
+#define super OSObject
+
+class GEMHandleTable : public OSObject {
+    OSDeclareDefaultStructors(GEMHandleTable);
+
+public:
+    OSDictionary* dict;
+    IOLock* lock;
+    uint32_t nextHandle;
+
+    static GEMHandleTable* create() {
+        GEMHandleTable* t = OSTypeAlloc(GEMHandleTable);
+        if (!t || !t->init()) {
+            if (t) t->release();
+            return nullptr;
+        }
+        t->dict = OSDictionary::withCapacity(256);
+        t->lock = IOLockAlloc();
+        t->nextHandle = 1;
+        return t;
+    }
+
+    bool init() override {
+        if (!OSObject::init()) return false;
+        dict = nullptr;
+        lock = nullptr;
+        nextHandle = 1;
+        return true;
+    }
+
+    void free() override {
+        if (dict) dict->release();
+        if (lock) IOLockFree(lock);
+        super::free();
+    }
+
+    uint32_t add(FakeIrisXEGEM* gem) {
+        IOLockLock(lock);
+
+        char keybuf[32];
+        snprintf(keybuf, sizeof(keybuf), "%u", nextHandle);
+
+        const OSSymbol* key = OSSymbol::withCString(keybuf);
+        dict->setObject(key, gem);
+        key->release();
+
+        gem->retain();
+        return nextHandle++;
+    }
+
+    FakeIrisXEGEM* lookup(uint32_t h) {
+        IOLockLock(lock);
+
+        char keybuf[32];
+        snprintf(keybuf, sizeof(keybuf), "%u", h);
+
+        const OSSymbol* key = OSSymbol::withCString(keybuf);
+        OSObject* o = dict->getObject(key);
+        key->release();
+
+        FakeIrisXEGEM* gem = OSDynamicCast(FakeIrisXEGEM, o);
+        if (gem) gem->retain();
+
+        IOLockUnlock(lock);
+        return gem;
+    }
+
+    bool remove(uint32_t h) {
+        IOLockLock(lock);
+
+        char keybuf[32];
+        snprintf(keybuf, sizeof(keybuf), "%u", h);
+
+        const OSSymbol* key = OSSymbol::withCString(keybuf);
+        bool exists = dict->getObject(key) != nullptr;
+
+        if (exists) {
+            FakeIrisXEGEM* gem = OSDynamicCast(FakeIrisXEGEM, dict->getObject(key));
+            if (gem) gem->release();
+            dict->removeObject(key);
+        }
+
+        key->release();
+        IOLockUnlock(lock);
+        return exists;
+    }
+};
+
+OSDefineMetaClassAndStructors(GEMHandleTable, OSObject)
+
+
+
+
+#define super IOUserClient
+OSDefineMetaClassAndStructors(FakeIrisXEAcceleratorUserClient, IOUserClient)
+
+bool FakeIrisXEAcceleratorUserClient::initWithTask(task_t task, void* secID, UInt32 type)
 {
-    if (!IOUserClient::initWithTask(owningTask, securityID, type))
-        return false;
-    fTask = owningTask;
+    if (!super::initWithTask(task, secID, type)) return false;
+    fTask = task;
     return true;
 }
 
-
-
 bool FakeIrisXEAcceleratorUserClient::start(IOService* provider)
 {
-    if (!IOUserClient::start(provider))
-        return false;
+    if (!super::start(provider)) return false;
 
     fOwner = OSDynamicCast(FakeIrisXEAccelerator, provider);
     if (!fOwner) return false;
 
-    IOLog("(FakeIrisXEFramebuffer) [AccelUC] started\n");
+    fHandleTable = GEMHandleTable::create();
+    return true;
+}
 
-    // Only allocate page, do NOT attach yet
-    fSharedMem = IOBufferMemoryDescriptor::inTaskWithOptions(
-        kernel_task,
-        kIODirectionInOut | kIOMemoryKernelUserShared,
-        XE_PAGE);
+void FakeIrisXEAcceleratorUserClient::stop(IOService* provider)
+{
+    fOwner = nullptr;
+    super::stop(provider);
+}
 
-    if (!fSharedMem) return false;
+IOReturn FakeIrisXEAcceleratorUserClient::clientClose() {
+    return kIOReturnSuccess;
+}
 
-    bzero(fSharedMem->getBytesNoCopy(), XE_PAGE);
-    fSharedHdr = (volatile XEHdr*)fSharedMem->getBytesNoCopy();
 
-    fSharedHdr->magic    = XE_MAGIC;
-    fSharedHdr->version  = XE_VERSION;
-    fSharedHdr->capacity = XE_PAGE - sizeof(XEHdr);
-    fSharedHdr->head     = 0;
-    fSharedHdr->tail     = 0;
+uint32_t FakeIrisXEAcceleratorUserClient::createGemAndRegister(uint64_t size, uint32_t flags)
+{
+    FakeIrisXEGEM* gem = FakeIrisXEGEM::withSize((size_t)size, flags);
+    if (!gem) return 0;
 
-    fRingBase = ((uint8_t*)fSharedHdr) + sizeof(XEHdr);
+    uint32_t handle = fHandleTable->add(gem);
+    gem->release();
+    return handle;
+}
 
+bool FakeIrisXEAcceleratorUserClient::destroyGemHandle(uint32_t h)
+{
+    return fHandleTable->remove(h);
+}
+
+IOReturn FakeIrisXEAcceleratorUserClient::pinGemHandle(uint32_t handle, uint64_t* outGpuAddr)
+{
+    FakeIrisXEGEM* gem = fHandleTable->lookup(handle);
+    if (!gem) return kIOReturnNotFound;
+
+    gem->pin();
+
+    uint64_t gpuVA = fOwner->fFramebuffer->ggttMap(gem);
+    gem->setGpuAddress(gpuVA);   // add this new method
+
+    *outGpuAddr = gpuVA;
+
+    gem->release();
+    return kIOReturnSuccess;
+}
+
+bool FakeIrisXEAcceleratorUserClient::unpinGemHandle(uint32_t handle) {
+    FakeIrisXEGEM* gem = fHandleTable->lookup(handle);
+    if (!gem) return false;
+
+    uint64_t gpuVA = gem->gpuAddress();    // retrieve
+    uint32_t pages = gem->pageCount();
+
+    fOwner->fFramebuffer->ggttUnmap(gpuVA, pages);
+    gem->unpin();
+
+    gem->release();
     return true;
 }
 
 
-
-
-
-
-
-void FakeIrisXEAcceleratorUserClient::stop(IOService* provider)
+IOReturn FakeIrisXEAcceleratorUserClient::getPhysPagesForHandle(
+    uint32_t h, void* outBuf, size_t* outSize)
 {
-    IOLog("(FakeIrisXEFramebuffer) [AccelUC] stop\n");
+    FakeIrisXEGEM* gem = fHandleTable->lookup(h);
+    if (!gem) return kIOReturnNotFound;
 
-    // DO NOT TOUCH fOwner->fTimer EVER
-    // Accelerator owns its timer; UC must never manage it.
+    uint32_t pages = gem->pageCount();
+    size_t need = pages * sizeof(uint64_t);
 
-    if (fSharedMem) {
-        fSharedMem->release();
-        fSharedMem = nullptr;
-        fSharedHdr = nullptr;
-        fRingBase = nullptr;
+    if (!outBuf || *outSize < need) {
+        *outSize = need;
+        gem->release();
+        return kIOReturnNoSpace;
     }
 
-    fOwner = nullptr;
+    uint64_t offset = 0;
+    uint64_t* arr = (uint64_t*)outBuf;
 
-    IOUserClient::stop(provider);
-}
+    for (uint32_t i = 0; i < pages; i++) {
+        uint64_t len = 0;
+        arr[i] = gem->getPhysicalSegment(offset, &len);
+        offset += len ? len : 4096;
+    }
 
-
-
-
-
-
-
-IOReturn FakeIrisXEAcceleratorUserClient::clientClose()
-{
+    *outSize = need;
+    gem->release();
     return kIOReturnSuccess;
 }
 
 
-IOReturn FakeIrisXEAcceleratorUserClient::externalMethod(uint32_t selector,
-                                                         IOExternalMethodArguments* args,
-                                                         IOExternalMethodDispatch*,
-                                                         OSObject*,
-                                                         void*)
+
+
+IOReturn FakeIrisXEAcceleratorUserClient::clientMemoryForType(
+    UInt32 type, UInt32* flags, IOMemoryDescriptor** mem)
 {
-    if (!fOwner) return kIOReturnNotReady;
+    if (!mem) return kIOReturnBadArgument;
+
+    uint32_t handle = fLastRequestedGemHandle;
+    FakeIrisXEGEM* gem = fHandleTable->lookup(handle);
+    if (!gem) return kIOReturnNotFound;
+
+    IOBufferMemoryDescriptor* desc = gem->memoryDescriptor();
+    if (!desc) {
+        gem->release();
+        return kIOReturnNoMemory;
+    }
+
+    desc->retain();
+    *mem = desc;
+    *flags = 0;
+
+    gem->release();
+    return kIOReturnSuccess;
+}
+
+
+
+
+
+
+
+IOReturn FakeIrisXEAcceleratorUserClient::externalMethod(
+    uint32_t selector,
+    IOExternalMethodArguments* args,
+    IOExternalMethodDispatch* dispatch,
+    OSObject* target,
+    void* ref)
+{
+    IOLog("(FakeIrisXEFramebuffer) [UC] externalMethod selector=%u\n", selector);
 
     switch (selector) {
-        case kAccelSel_Ping:
-            return kIOReturnSuccess;
-        case kAccelSel_InjectTest:
-            return doInjectTest();
-        case kAccelSel_GetCaps:
-            if (!args || !args->structureOutput) return kIOReturnBadArgument;
-            {
-                XEAccelCaps caps{};
-                fOwner->getCaps(caps); // accelerator must implement getCaps(XEAccelCaps&)
-                bcopy(&caps, args->structureOutput, sizeof(caps));
-                args->structureOutputSize = sizeof(caps);
-                return kIOReturnSuccess;
+
+        case kFakeIris_Method_SubmitExeclistFenceTest:
+        {
+            IOLog("(FakeIrisXEFramebuffer) [UC] SubmitExeclistFenceTest called\n");
+
+            if (!fOwner) {
+                IOLog("(FakeIrisXEFramebuffer) [UC] no owner\n");
+                return kIOReturnNotReady;
             }
-        case kAccelSel_CreateContext:
-            if (!args || !args->structureInput) return kIOReturnBadArgument;
-            {
-                const XECreateCtxIn* in = reinterpret_cast<const XECreateCtxIn*>(args->structureInput);
-                XECreateCtxOut out{};
-                out.ctxId = fOwner->createContext(in->sharedGPUPtr, in->flags);
-                if (!args->structureOutput || args->structureOutputSize < sizeof(out)) return kIOReturnMessageTooLarge;
-                bcopy(&out, args->structureOutput, sizeof(out));
-                args->structureOutputSize = sizeof(out);
-                return kIOReturnSuccess;
+
+            FakeIrisXEFramebuffer* fb = fOwner->getFramebufferOwner();
+            if (!fb) {
+                IOLog("(FakeIrisXEFramebuffer) [UC] no framebuffer owner\n");
+                return kIOReturnNotReady;
             }
-        case kAccelSel_Submit:
-            // For your current test harness we can treat submit as a stub that returns success.
-            return kIOReturnSuccess;
-        case kAccelSel_Flush:
-            // optional: call accelerator flush( ctx )
-            if (args && args->scalarInput && args->scalarInputCount >= 1) {
-                uint32_t ctxId = static_cast<uint32_t>(args->scalarInput[0]);
-                return fOwner->flush(ctxId);
-            }
-            return fOwner->flush(0);
-        case kAccelSel_DestroyContext:
-            if (!args || !args->scalarInput || args->scalarInputCount < 1) return kIOReturnBadArgument;
-            return fOwner->destroyContext(static_cast<uint32_t>(args->scalarInput[0]));
-     
+
             
+            FakeIrisXEExeclist* exec = fOwner->fExeclistFromFB;
+            FakeIrisXERing* ring = fOwner->fRcsRingFromFB;
+
+            if (!exec || !ring) {
+                IOLog("❌ [UC] Missing exec=%p ring=%p\n", exec, ring);
+                return kIOReturnNotReady;
+            }
+
+
+
+            
+            FakeIrisXEGEM* batchGem = fb->createTinyBatchGem();
+            if (!batchGem) {
+                IOLog("(FakeIrisXEFramebuffer) [UC] createTinyBatchGem FAILED\n");
+                return kIOReturnNoMemory;
+            }
+
+            bool ok = exec->submitBatchWithExeclist(fb, batchGem, 0, ring, 2000);
+
+
+            batchGem->release();
+
+            IOLog("(FakeIrisXEFramebuffer) [UC] SubmitExeclistFenceTest result=%d\n",
+                  ok ? 1 : 0);
+            return ok ? kIOReturnSuccess : kIOReturnError;
+        }
+
         default:
+            IOLog("(FakeIrisXEFramebuffer) [UC] externalMethod unsupported selector=%u\n",
+                  selector);
             return kIOReturnUnsupported;
     }
-}
-
-// Provide the shared memory descriptor to userspace when they request type==1
-// Provide the shared memory descriptor to userspace when they request type==1
-IOReturn FakeIrisXEAcceleratorUserClient::clientMemoryForType(
-        UInt32 type,
-        IOOptionBits *options,
-        IOMemoryDescriptor **memory )
-{
-    if (type == 1) {
-        *options = kIOMapDefaultCache;
-
-        if (!fSharedMem) return kIOReturnNotFound;
-
-        *memory = fSharedMem;
-        (*memory)->retain();
-
-        // *** IMPORTANT ***
-        fOwner->attachShared( fSharedMem );
-        fOwner->startWorkerLoop();        // <-- FIX
-
-        return kIOReturnSuccess;
-    }
-    return IOUserClient::clientMemoryForType(type, options, memory);
-}
-
-
-
-IOReturn FakeIrisXEAcceleratorUserClient::doInjectTest()
-{
-    if (!fOwner || !fOwner->fHdr || !fOwner->fRingBase)
-        return kIOReturnNotReady;
-
-    XECmd cmd{};
-    cmd.opcode = XE_CMD_CLEAR;
-    cmd.bytes  = 4;      // <<<< CLEAR has a 4-byte payload
-    cmd.ctxId  = 0;
-
-    uint32_t color = 0xFFFF0000;
-
-    uint32_t head = fOwner->fHdr->head;
-    uint32_t cap  = fOwner->fHdr->capacity;
-
-    uint32_t total = xe_align(sizeof(XECmd) + cmd.bytes);
-
-    // write header
-    if (head + sizeof(XECmd) <= cap)
-        memcpy(fOwner->fRingBase + head, &cmd, sizeof(cmd));
-    else {
-        uint32_t first = cap - head;
-        memcpy(fOwner->fRingBase + head, &cmd, first);
-        memcpy(fOwner->fRingBase, ((uint8_t*)&cmd)+first, sizeof(cmd)-first);
-    }
-
-    // write payload
-    uint32_t poff = (head + sizeof(XECmd)) % cap;
-    if (poff + 4 <= cap)
-        memcpy(fOwner->fRingBase + poff, &color, 4);
-    else {
-        uint32_t first = cap - poff;
-        memcpy(fOwner->fRingBase + poff, &color, first);
-        memcpy(fOwner->fRingBase, ((uint8_t*)&color)+first, 4-first);
-    }
-
-    fOwner->fHdr->head = (head + total) % cap;
-    OSSynchronizeIO();
-
-    IOLog("[UC] InjectTest wrote CLEAR (head=%u)\n", fOwner->fHdr->head);
-    return kIOReturnSuccess;
 }
