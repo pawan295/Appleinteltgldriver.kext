@@ -24,6 +24,21 @@
 #include <libkern/OSAtomic.h>
 #include <pexpert/i386/boot.h>            // PE_Video
 
+#include <IOKit/IOLocks.h>
+
+
+
+#include "FakeIrisXEAccelerator.hpp"
+
+#include "FakeIrisXEGEM.hpp"
+#include "FakeIrisXERing.h"
+#include "i915_reg.h"
+
+
+#include "FakeIrisXEGuC.hpp"
+#include "embedded_firmware.h"
+
+
 extern "C" {
     #include <pexpert/pexpert.h>
     #include <pexpert/device_tree.h>
@@ -219,8 +234,163 @@ inline uint32_t safeMMIORead(uint32_t offset){
 
 
 
-/* FakeIrisXEFramebuffer.cpp */
+//helper to reactive gpu power
 
+bool FakeIrisXEFramebuffer::gpuPowerOn(){
+    IOLog("gpuPowerOn(): Waking GT + RCS engine...\n");
+
+    if (!pciDevice || !pciDevice->isOpen(this)) {
+        IOLog("❌ gpuPowerOn(): PCI device not open\n");
+        return false;
+    }
+    // --- PCI Power Management (Force D0) ---
+    uint16_t pmcsr = pciDevice->configRead16(0x84);
+    IOLog("PCI PMCSR before = 0x%04X\n", pmcsr);
+    pmcsr &= ~0x3; // Force D0
+    pciDevice->configWrite16(0x84, pmcsr);
+    IOSleep(10);
+    pmcsr = pciDevice->configRead16(0x84);
+    IOLog("PCI PMCSR after force = 0x%04X\n", pmcsr);
+
+    // --- Hardware Register Defines ---
+    const uint32_t GT_PG_ENABLE = 0xA218;
+    const uint32_t PUNIT_PG_CTRL = 0xA2B0;
+    
+    // PW1 (Render)
+    const uint32_t PWR_WELL_CTL_1 = 0x45400;
+    const uint32_t PWR_WELL_STATUS = 0x45408;
+    const uint32_t PW_1_STATUS_BIT = (1 << 30);
+
+    // PW2 (Display)
+    const uint32_t PWR_WELL_CTL_2 = 0x45404;
+    const uint32_t PW_2_REQ_BIT = (1 << 0);
+    const uint32_t PW_2_STATE_VALUE = 0x000000FF;
+
+    // Force wake
+    const uint32_t FORCEWAKE_RENDER_CTL = 0xA188;
+    const uint32_t FORCEWAKE_ACK_RENDER = 0x130044;
+    const uint32_t RENDER_WAKE_VALUE = 0x000F000F; // Aggressive
+    const uint32_t RENDER_ACK_BIT = 0x00000001;
+
+    // MBUS
+    const uint32_t MBUS_DBOX_CTL_A = 0x7003C;
+    const uint32_t MBUS_DBOX_VALUE = 0xb1038c02;
+
+    // --- V24 NEW CLOCK REGISTERS ---
+    const uint32_t LCPLL1_CTL = 0x46010;
+    const uint32_t LCPLL1_VALUE = 0xcc000000;
+    const uint32_t TRANS_CLK_SEL_A = 0x46140;
+    const uint32_t TRANS_CLK_VALUE = 0x10000000;
+
+    // 1. GT Power Gating Control
+    safeMMIOWrite(GT_PG_ENABLE, safeMMIORead(GT_PG_ENABLE) & ~0x1);
+    IOSleep(10);
+
+    // 2. PUNIT Power Gating Control
+    safeMMIOWrite(PUNIT_PG_CTRL, safeMMIORead(PUNIT_PG_CTRL) & ~0x80000000);
+    IOSleep(15);
+
+    // 3. Power Well 1 Control (KNOWN GOOD)
+    IOLog("Requesting Power Well 1 (Render)...\n");
+    safeMMIOWrite(PWR_WELL_CTL_1, safeMMIORead(PWR_WELL_CTL_1) | 0x2);
+    IOSleep(10);
+    safeMMIOWrite(PWR_WELL_CTL_1, safeMMIORead(PWR_WELL_CTL_1) | 0x4);
+    IOSleep(10);
+
+    // 4. VERIFY Power Well 1 (KNOWN GOOD)
+    IOLog("Waiting for Power Well 1 to be enabled...\n");
+    int tries = 0;
+    bool pw1_up = false;
+    while (tries++ < 20) {
+        if (safeMMIORead(PWR_WELL_STATUS) & PW_1_STATUS_BIT) {
+            pw1_up = true;
+            IOLog("✅ Power Well 1 is UP! Status: 0x%08X\n", safeMMIORead(PWR_WELL_STATUS));
+            break;
+        }
+        IOSleep(10);
+    }
+    if (!pw1_up) {
+        IOLog("❌ ERROR: Power Well 1 FAILED to enable! Status: 0x%08X\n", safeMMIORead(PWR_WELL_STATUS));
+        return false;
+    }
+
+    // 5. Power Well 2 Control (KNOWN GOOD)
+    IOLog("Requesting Power Well 2 (Display) via bit 0...\n");
+    safeMMIOWrite(PWR_WELL_CTL_2, safeMMIORead(PWR_WELL_CTL_2) | PW_2_REQ_BIT);
+
+    // 6. VERIFY Power Well 2 (KNOWN GOOD)
+    IOLog("Waiting for Power Well 2 to be enabled (polling 0x45404 for 0xFF)...\n");
+    tries = 0;
+    bool pw2_up = false;
+    while (tries++ < 50) {
+        uint32_t pw2_status = safeMMIORead(PWR_WELL_CTL_2);
+        if ((pw2_status & 0xFF) == PW_2_STATE_VALUE) {
+            pw2_up = true;
+            IOLog("✅ Power Well 2 is UP! Status: 0x%08X\n", pw2_status);
+            break;
+        }
+        IOSleep(10);
+    }
+    if (!pw2_up) {
+        IOLog("❌ ERROR: Power Well 2 FAILED to enable! Status: 0x%08X\n", safeMMIORead(PWR_WELL_CTL_2));
+        return false;
+    }
+
+    // 7. FORCEWAKE Sequence (KNOWN GOOD)
+    IOLog("Initiating AGGRESSIVE FORCEWAKE (0xF)...\n");
+    safeMMIOWrite(FORCEWAKE_RENDER_CTL, RENDER_WAKE_VALUE); // Write 0x000F000F
+    
+    bool forcewake_ack = false;
+    for (int i = 0; i < 100; i++) {
+        uint32_t ack = safeMMIORead(FORCEWAKE_ACK_RENDER);
+        if ((ack & RENDER_ACK_BIT) == RENDER_ACK_BIT) {
+            forcewake_ack = true;
+            IOLog("✅ Render ACK received! (0x%08X)\n", ack);
+            break;
+        }
+        IOSleep(10);
+    }
+    if (!forcewake_ack) {
+        IOLog("❌ ERROR: Render force-wake FAILED!\n");
+        return false;
+        
+    }
+    
+    
+    // 1. Define the register (GEN9_PG_ENABLE is usually 0x8000)
+    //#define GEN9_PG_ENABLE 0x8000
+
+    // 2. Read current state
+    uint32_t pg_status = safeMMIORead(GEN9_PG_ENABLE);
+
+    // 3. If bit 2 (Render Gating) is set, KILL IT.
+    if (pg_status & 0x00000004) {
+        IOLog("⚠️ Render Power Gating is ON (0x%x). Disabling it...", pg_status);
+        
+        // Write 0 to disable all power gating logic
+        safeMMIOWrite(GEN9_PG_ENABLE, 0x00000000);
+        
+        // Crucial: Wait for the hardware to stabilize
+        IODelay(500);
+        
+        // Verify
+        uint32_t new_pg = safeMMIORead(GEN9_PG_ENABLE);
+        IOLog("✅ Power Gating Status Now: 0x%x", new_pg);
+    }
+    
+    
+    
+    IOLog("gpuPowerOn(): GT and RCS awake — READY for ELSP writes!\n");
+    return true;
+}
+
+
+
+
+
+
+
+// hardware init on startup
 bool FakeIrisXEFramebuffer::initPowerManagement() {
     IOLog("🚀 Initiating CORRECTED-V24 power management (Enabling Clocks)...\n");
 
@@ -384,7 +554,10 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 
     //    pciDevice->retain();
 
+
     
+    
+  
     
     // 1️⃣ Open PCI device
     IOLog("📦 Opening PCI device...\n");
@@ -471,8 +644,7 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     mmioBase = (volatile uint8_t*)mmioMap->getVirtualAddress();
     IOLog("BAR0 mapped successfully (len: 0x%llX)\n", mmioMap->getLength());
 
-  
-    
+
     
     
    
@@ -696,6 +868,60 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
     
+    // FIXED: Dynamic VRAM detection (stolen + GTT for full "Total")
+        if (!pciDevice || !mmioBase) {
+            IOLog("VRAM detect: No PCI/MMIO — fallback 256MB\n");
+            return 256ULL * 1024ULL * 1024ULL;
+        }
+
+        // Step 1: GTT aperture from BAR1
+        uint64_t bar1Lo = pciDevice->configRead32(0x18) & ~0xFULL;
+        uint64_t bar1Hi = pciDevice->configRead32(0x1C);
+        uint64_t gttSize = (bar1Hi << 32) | bar1Lo;
+        if (gttSize == 0) gttSize = 256ULL * 1024ULL * 1024ULL;
+
+        // Step 2: Stolen memory from MMIO 0x5C (TGL/Xe)
+        uint32_t stolenReg = safeMMIORead(0x5C);
+        uint64_t stolenMB = ((stolenReg >> 25) & 0x7F) * 4ULL;  // Bits 31:25 = 4MB units
+        if (stolenMB == 0) stolenMB = 128ULL;
+
+        // FIXED: Total = stolen + GTT (full iGPU "VRAM")
+        uint64_t totalVramBytes = (stolenMB + (gttSize / (1024ULL * 1024ULL))) * 1024ULL * 1024ULL;
+        IOLog("Dynamic VRAM: GTT=%llu MB, stolen=%llu MB, total=%llu bytes\n", gttSize / (1024ULL * 1024ULL), stolenMB, totalVramBytes);
+
+         
+        // Use it (after alloc, before props)
+    uint64_t realVramBytes = totalVramBytes;
+    setProperty("IOAccelVRAMSize", realVramBytes, 64);  // Metal/QE full
+    setProperty("IOFBMemorySize", realVramBytes, 32);   // Display fallback (force 32-bit to full)
+    IOLog("VRAM props set: %llu bytes (~%llu MB)\n", realVramBytes, realVramBytes / (1024ULL * 1024ULL));
+    
+
+    
+    
+    
+    textureMemorySize = 64 * 1024 * 1024; // 64MB for textures
+    textureMemory = IOBufferMemoryDescriptor::inTaskWithPhysicalMask(
+        kernel_task,
+        kIODirectionInOut | kIOMemoryKernelUserShared,
+        textureMemorySize,
+        0x00000000FFFFFFF0ULL
+    );
+
+    if (textureMemory) {
+        setProperty("IOAccelTextureMemory", textureMemory);
+        IOLog("✅ Texture memory allocated: %zu MB\n", textureMemorySize / (1024*1024));
+    }
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     
     /*
     // Create work loop and command gate
@@ -847,13 +1073,86 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     
 
-    setProperty("IOFBMemorySize", framebufferMemory->getLength(), 32);
     setProperty("IOFBOnline", kOSBooleanTrue);
     setProperty("IOFBDisplayModeCount", (uint64_t)1, 32);
     setProperty("IOFBIsMainDisplay", kOSBooleanTrue);
     setProperty("AAPL,boot-display", kOSBooleanTrue);
 
+    setProperty("brightness-control", kOSBooleanTrue);
+    setProperty("IOBacklight", kOSBooleanTrue);
+    // backlight-index / backlight-control-type must be OSNumber
+    OSNumber *idx = OSNumber::withNumber((uint64_t)1ULL, 32);
+    if (idx) { setProperty("AAPL,backlight-control-type", idx); idx->release(); }
     
+    setProperty("IODisplayHasBacklight", kOSBooleanTrue);
+
+    
+    //optional
+    // Transparency and vibrancy support
+    setProperty("IOFBTranslucencySupport", kOSBooleanTrue);
+    setProperty("IOFBVibrantSupport", kOSBooleanTrue);
+    setProperty("IOFBAlphaBlending", kOSBooleanTrue);
+    setProperty("IOFBCompositeSupport", kOSBooleanTrue);
+
+    // Window server acceleration
+    setProperty("IOFBWSAASupport", kOSBooleanTrue);
+    setProperty("IOFBWSSupport", kOSBooleanTrue);
+
+    // Hardware compositing
+    setProperty("IOFBHardwareCompositing", kOSBooleanTrue);
+    setProperty("IOFBAutoCompositing", kOSBooleanTrue);
+    
+    // Replace your existing framebuffer properties with these:
+    setProperty("IOAccelerator", kOSBooleanTrue);
+    setProperty("IOAccelIndex", 0ULL, 32);
+    setProperty("IOAccelRevision", 2ULL, 32);
+    setProperty("IOAccelVideoMemorySize", framebufferMemory->getLength(), 64);
+    setProperty("IOAccelMemorySize", 134217728ULL, 64);
+
+    // Critical for Core Image
+    setProperty("CISupported", kOSBooleanTrue);
+    setProperty("CIAllowSoftwareRenderer", kOSBooleanFalse); // Force hardware
+    setProperty("CIContextUseSoftwareRenderer", kOSBooleanFalse);
+
+    // IOSurface capabilities
+    setProperty("IOSurfaceSupported", kOSBooleanTrue);
+    setProperty("IOSurfaceIsGlobal", kOSBooleanTrue);
+    setProperty("IOSurfaceCacheMode", 0ULL, 32);
+
+    // Additional acceleration hints
+    setProperty("IOAccelSurfaceSupported", kOSBooleanTrue);
+    setProperty("IOAccelCLContextSupported", kOSBooleanTrue);
+    setProperty("IOAccelGLContextSupported", kOSBooleanTrue);
+    // Enable IOSurface support - CRITICAL for transparency
+    setProperty("IOSurfaceSupport", kOSBooleanTrue);
+    setProperty("IOSurfaceIsGlobal", kOSBooleanTrue);
+    setProperty("IOAccelSurfaceSupported", kOSBooleanTrue);
+
+    // Core Image acceleration
+    setProperty("CISupported", kOSBooleanTrue);
+    setProperty("CIBlurSupported", kOSBooleanTrue);
+    setProperty("CITransparencySupported", kOSBooleanTrue);
+
+    // Quartz Extreme requirements
+    setProperty("IOAccelVideoMemorySize", framebufferMemory->getLength(), 64);
+    setProperty("IOAccelMemorySize", 134217728ULL, 64); // 128MB for textures
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+
     
 
 
@@ -927,12 +1226,334 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
 */
     
     activatePowerAndController();
+    
+    
+    /*
+    // ================================================
+       // FIRMWARE LOADING - Add this AFTER PCI/MMIO init
+       // ================================================
+       IOLog("(FakeIrisXE) Loading firmware...\n");
+       
+         IOLog("(FakeIrisXE) ✅ Firmware loading, initializing GuC...\n");
+           
+           // Initialize GuC system if firmware loaded
+           if (!initGuCSystem()) {
+               IOLog("(FakeIrisXE) ⚠️ GuC init failed, falling back to legacy execlist\n");
+               fGuCEnabled = false;
+           } else {
+               fGuCEnabled = true;
+               IOLog("(FakeIrisXE) ✅ GuC submission enabled\n");
+           }
+     */
 
+    
+    // ---- GGTT Aperture Mapping ----
+
+    // 1. Read BAR0 (GTTMMADR)
+    uint64_t gttAddr = pciDevice->configRead32(kIOPCIConfigBaseAddress0);
+    gttAddr &= ~0xFULL;    // clear PCI flags
+
+    uint64_t gttSize2 = 2 * 1024 * 1024; // 2MB GGTT
+
+    // 2. Create mapping for GGTT table
+    IOMemoryDescriptor* desc = IOMemoryDescriptor::withPhysicalAddress(
+        gttAddr,
+        gttSize2,
+        kIODirectionOutIn
+    );
+
+    if (!desc) {
+        IOLog("FakeIrisXEFramebuffer: Failed to create GGTT descriptor\n");
+        return false;
+    }
+
+    IOMemoryMap* map = desc->map();
+    if (!map) {
+        IOLog("FakeIrisXEFramebuffer: Failed to map GGTT\n");
+        desc->release();
+        return false;
+    }
+
+    // 3. Save GGTT pointer
+    fGGTT = (volatile uint32_t*)map->getVirtualAddress();
+    fGGTTSize = gttSize2;
+    fGGTTBaseGPU = 0x00000000;
+    fNextGGTTOffset = 0x00100000;   // leave hardware reserved region
+
+    IOLog("FakeIrisXEFramebuffer: GGTT mapped at %p\n", fGGTT);
+
+    
+//ring rcs
+    
+    IOPCIDevice* pci = OSDynamicCast(IOPCIDevice, provider);
+    pci->retain();
+    pci->setMemoryEnable(true);
+
+    if (!map) {
+        IOLog("Failed to map BAR0\n");
+        return false;
+    }
+
+    fBar0 = (volatile uint32_t*)map->getVirtualAddress();
+    IOLog("BAR0 mapped at %p\n", fBar0);
+
+
+    // 1. Create ring object
+    fRingRCS = new FakeIrisXERing(fBar0);
+
+    // 2. Allocate 64KB ring buffer
+    if (!fRingRCS->allocateRing(64 * 1024)) {
+        IOLog("Failed to allocate RCS ring\n");
+        return false;
+    }
+
+    // 3. Attach GPU address (if you have GGTT mapping)
+    fRingRCS->attachRingGPUAddress(gttAddr);
+        // gttAddr = GPU VA of the ring buffer
+
+    // 4. Program ring registers
+    fRingRCS->programRingBaseToHW();
+
+    // 5. Enable ring
+    fRingRCS->enableRing();
+
+    IOLog("RCS ring initialization complete.\n");
+
+
+    
+    // map BAR0 into fBar0 — you already have this
+    // map GGTT into fGGTT — you already have this
+    fNextGGTTOffset = 0x00100000; // choose appropriate base
+
+    // Create ring
+    if (!createRcsRing(256 * 1024)) {
+        IOLog("FakeIrisXEFramebuffer: createRcsRing failed\n");
+        return false;
+    }else{
+        
+        IOLog("FakeIrisXEFramebuffer: createRcsRing Succes\n");
+
+    }
+
+    // optional: create & map fence early (so submitBatch doesn't do it)
+    fFenceGEM = FakeIrisXEGEM::withSize(4096, 0);
+    fFenceGEM->pin();
+
+   
+    
+    
+
+    //enabling interrupts:
+    // Create / obtain a workloop (safe)
+    fWorkLoop = getWorkLoop();
+    if (!fWorkLoop) {
+        // create our own workloop if none provided
+        fWorkLoop = IOWorkLoop::workLoop();
+        if (!fWorkLoop) {
+            IOLog("FakeIrisXEFramebuffer: createWorkLoop failed\n");
+            // still continue — we will operate without IRQs
+        } else {
+            fWorkLoop->retain();
+            IOLog("FakeIrisXEFramebuffer: created own workloop\n");
+        }
+    } else {
+        fWorkLoop->retain();
+        IOLog("FakeIrisXEFramebuffer: obtained existing workloop\n");
+    }
+
+    // Make sure provider is an IOPCIDevice
+    IOService* prov = provider;
+    if (!prov) {
+        IOLog("FakeIrisXEFramebuffer: no provider for interrupts\n");
+    } else if (fWorkLoop) {
+        // Create the interrupt source using trampoline (C-callback)
+        fInterruptSource = IOInterruptEventSource::interruptEventSource(
+            this,
+            handleInterruptTrampoline,
+            prov
+        );
+
+        if (!fInterruptSource) {
+            IOLog("FakeIrisXEFramebuffer: failed to create interrupt source\n");
+            // We will not enable IRQs
+        } else {
+            fWorkLoop->addEventSource(fInterruptSource);
+            // Do not call enable() here until we safely unmask registers in the next step
+            IOLog("FakeIrisXEFramebuffer: interrupt source created (not yet enabled)\n");
+        }
+    }
+
+    
+    
+    
+    // Create lock for pending submissions
+    if (!fPendingLock)
+        fPendingLock = IOLockAlloc();
+
+    // Pending submission array
+    if (!fPendingSubmissions)
+        fPendingSubmissions = OSArray::withCapacity(16);
+
+    // Create IOCommandGate
+    if (fWorkLoop && !fCmdGate) {
+        fCmdGate = IOCommandGate::commandGate(this);
+        if (fCmdGate) {
+            fWorkLoop->addEventSource(fCmdGate);
+            IOLog("FakeIrisXEFramebuffer: commandGate added\n");
+        }
+    }
+
+    
+
+    enableRcsInterruptsSafely();
+
+    
+   
+    // ---------------------------------------------------------
+    // PHASE 7.2 — Initialize Execlists engine (REAL GPU PATH)
+    // ---------------------------------------------------------
+    IOLog("FakeIrisXEFramebuffer: Initializing EXECLIST engine...\n");
+
+    fExeclist = FakeIrisXEExeclist::withOwner(this);
+
+    
+    
+    if (!fExeclist) {
+        IOLog("FakeIrisXEFramebuffer: EXECLIST allocation FAILED\n");
+    } else {
+        
+        
+        
+        if (!fExeclist->createHwContext()) {
+            IOLog("FakeIrisXEFramebuffer: EXECLIST HW context FAILED\n");
+        } else {
+            IOLog("FakeIrisXEFramebuffer: EXECLIST HW context OK\n");
+
+            if (!fExeclist->setupExeclistPorts()) {
+                IOLog("FakeIrisXEFramebuffer: EXECLIST port setup FAILED\n");
+            } else {
+                IOLog("FakeIrisXEFramebuffer: EXECLIST engine READY\n");
+            }
+        
+            // Create / init RCS ring (existing helper returns bool)
+            fRcsRing = createRcsRing(256 * 1024);
+            if (fRcsRing) {
+                IOLog("FakeIrisXEFramebuffer: RCS ring initialization complete. fRcsRing=%p\n", fRcsRing);
+            } else {
+                IOLog("FakeIrisXEFramebuffer: FAILED creating RCS ring\n");
+            }
+
+
+        
+        }
+    }
+
+    
+    
+    IOLog("FB scanning IOServicePlane children for FakeIrisXEAccelerator…\n");
+
+    OSIterator* iter = this->getChildIterator(gIOServicePlane);
+    if (iter)
+    {
+        IORegistryEntry* entry = nullptr;
+        while ((entry = OSDynamicCast(IORegistryEntry, iter->getNextObject())))
+        {
+            FakeIrisXEAccelerator* accel = OSDynamicCast(FakeIrisXEAccelerator, entry);
+            if (accel)
+            {
+                IOLog("🔗 Found Accelerator child %p — linking…\n", accel);
+                accel->linkFromFramebuffer(this);
+                IOLog("🟢 LINK SUCCESS — FB → Accelerator\n");
+                break;  // Important — only 1 accelerator
+            }
+        }
+        iter->release();
+    }
+
+    
+    
+    
+    
+    
+    
+
+    
+    
+    
+
+    
+    
+    
+    
+    // --- Create the Backlight Node ---
+    FakeIrisXEBacklight* backlight = OSTypeAlloc(FakeIrisXEBacklight);
+    if (backlight && backlight->init()) {
+
+        backlight->setName("AppleBacklightDisplay");
+        backlight->setProperty("IOClass", "IOBacklightDisplay");
+
+        backlight->setProperty("IOProviderClass", "IODisplayConnect");
+        backlight->setProperty("IONameMatch", "AppleBacklightDisplay");
+        backlight->setProperty("AAPL,backlight-control", kOSBooleanTrue);
+
+        // --- brightness params dictionary ---
+        // --- brightness params dictionary ---
+        OSDictionary* params = OSDictionary::withCapacity(2);
+        OSDictionary* bright = OSDictionary::withCapacity(3);
+        OSDictionary* vblm   = OSDictionary::withCapacity(3);
+        
+        
+        OSNumber *nMin   = OSNumber::withNumber((uint64_t)0ULL,   32);
+        OSNumber *nMax   = OSNumber::withNumber((uint64_t)100ULL, 32);
+        OSNumber *nVal   = OSNumber::withNumber((uint64_t)100ULL, 32);
+
+        if (bright && vblm && params && nMin && nMax && nVal) {
+
+            bright->setObject("min", nMin);
+            bright->setObject("max", nMax);
+            bright->setObject("value", nVal);
+
+            OSDictionary* brightnessDict = OSDictionary::withCapacity(3);
+            brightnessDict->setObject(OSSymbol::withCString("min"), nMin);
+            brightnessDict->setObject(OSSymbol::withCString("max"), nMax);
+                           brightnessDict->setObject(OSSymbol::withCString("value"), nVal);
+                           params->setObject(OSSymbol::withCString("brightness"), brightnessDict);
+
+            vblm->setObject("min", nMin);
+            vblm->setObject("max", nMax);
+            vblm->setObject("value", nVal);
+            params->setObject("vblm", vblm);
+            backlight->setProperty("IODisplayParameters", params);
+            
+        }
+
+        // release everything we created (setObject retained)
+        if (nMin) nMin->release();
+        if (nMax) nMax->release();
+        if (nVal) nVal->release();
+        if (bright) bright->release();
+        if (vblm) vblm->release();
+        if (params) params->release();
+
+
+        
+        // attach under display0
+        backlight->registerService();
+
+        IOLog("[FB] AppleBacklightDisplay published under IODisplayConnect\n");
+    }
+
+
+
+    
+    
+    
+    
     
     
   
     // 6. Then flush and notify
-    flushDisplay();
+    //flushDisplay();
     
     
     // 6. Finally, publish the framebuffer
@@ -943,6 +1564,10 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     
     registerService();
     IOLog("register service called");
+
+    
+    
+    
 
     
     
@@ -960,7 +1585,14 @@ bool FakeIrisXEFramebuffer::start(IOService* provider) {
     deliverFramebufferNotification(0, kIOFBConfigChanged, nullptr);
     IOLog("WS notified\n");
     
+   
+
+
+
     
+    
+
+
     
     
     IOLog("🏁 FakeIrisXEFramebuffer::start() - Completed\n");
@@ -974,6 +1606,41 @@ void FakeIrisXEFramebuffer::stop(IOService* provider)
 {
     IOLog("FakeIrisXEFramebuffer::stop() called — scheduling gated cleanup\n");
 
+    // in FakeIrisXEFramebuffer::stop(IOService* provider)
+    if (fInterruptSource) {
+        fInterruptSource->disable();
+        fWorkLoop->removeEventSource(fInterruptSource);
+        fInterruptSource->release();
+        fInterruptSource = nullptr;
+    }
+    if (fPendingSubmissions) {
+        fPendingSubmissions->release();
+        fPendingSubmissions = nullptr;
+    }
+    if (fWorkLoop) {
+        fWorkLoop->release();
+        fWorkLoop = nullptr;
+    }
+
+    
+    if (fCmdGate) {
+        fWorkLoop->removeEventSource(fCmdGate);
+        fCmdGate->release();
+        fCmdGate = nullptr;
+    }
+
+    if (fPendingSubmissions) {
+        cleanupAllPendingSubmissions();
+        fPendingSubmissions->release();
+        fPendingSubmissions = nullptr;
+    }
+
+    if (fPendingLock) {
+        IOLockFree(fPendingLock);
+        fPendingLock = nullptr;
+    }
+
+    
     // Mark we are shutting down so any timers/work will early-exit
     IOLockLock(timerLock);
     driverActive = false;
@@ -1317,20 +1984,6 @@ void FakeIrisXEFramebuffer::scheduleFlushFromAccelerator()
 }
 
 
-/*
-// in FakeIrisXEFramebuffer.cpp
-void FakeIrisXEFramebuffer::vblankTick(IOTimerEventSource* sender)
-{
-    // sequence of notifications WindowServer expects (you used these elsewhere)
-    deliverFramebufferNotification(0, 0x00000006, nullptr);
-    deliverFramebufferNotification(0, 0x00000008, nullptr);
-    deliverFramebufferNotification(0, 0x00000010, nullptr);
-    // re-schedule ~60Hz
-    sender->setTimeoutMS(16);
-}
-*/
-
-
 
 
 
@@ -1376,8 +2029,11 @@ void FakeIrisXEFramebuffer::vblankTick(IOTimerEventSource* sender)
 #define BXT_BLC_PWM_CTL2    0xC8254
 
 #define PLANE_OFFSET_1_A 0x00000000
+#define PIPECONF_A      0x70008
 
-
+// Tiger Lake / BXT backlight PWM registers (as used in your working snippet)
+static constexpr uint32_t BXT_BLC_PWM_FREQ1 = 0x000C8250;  // period / max PWM value in low 16 bits
+static constexpr uint32_t BXT_BLC_PWM_DUTY1 = 0x000C8254;  // duty (maybe low 16 bits)
 
 
 
@@ -1391,7 +2047,7 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     }
 
     // ---- constants (Tiger Lake) ----
-    const uint32_t PIPECONF_A       = 0x70008;
+ //   const uint32_t PIPECONF_A       = 0x70008;
     const uint32_t PIPE_SRC_A       = 0x6001C;
 
     auto rd = [&](uint32_t off) { return safeMMIORead(off); };
@@ -1599,39 +2255,10 @@ IOReturn FakeIrisXEFramebuffer::enableController() {
     
     
     // --- Enable backlight ---
-    const uint32_t BXT_BLC_PWM_FREQ1 = 0x000C8250;
-    const uint32_t BXT_BLC_PWM_DUTY1 = 0x000C8254;
-    wr(BXT_BLC_PWM_FREQ1, 0x0000FFFF);
-    wr(BXT_BLC_PWM_DUTY1, 0x00007FFF);
-    wr(BXT_BLC_PWM_CTL1,  0x80000000);
-    IOLog("Backlight PWM enabled (50%% duty)\n");
-    IOSleep(10);
+    initBacklightHardware();
 
     
-   
-    // --- Test pattern ---
-    IOLog("DEBUG: Painting solid red pattern…\n");
-    if (auto* fb = (uint32_t*)framebufferMemory->getBytesNoCopy()) {
-        const uint32_t pixels = width * height;
-        // Fill with solid red
-        for (uint32_t i = 0; i < pixels; ++i) {
-            fb[i] = 0x00FF0000; // XRGB: Red
-        }
 
-        // Add white border for verification
-        for (uint32_t x = 0; x < width; x++) {
-            fb[x] = 0x00FFFFFF;  // Top
-            fb[(height-1) * width + x] = 0x00FFFFFF;  // Bottom
-        }
-        for (uint32_t y = 0; y < height; y++) {
-            fb[y * width] = 0x00FFFFFF;  // Left
-            fb[y * width + (width-1)] = 0x00FFFFFF;  // Right
-        }
-    }
-
-    
-    
-    
     
     IOLog("DEBUG: Flushing display…\n");
     flushDisplay();
@@ -1756,9 +2383,10 @@ bool FakeIrisXEFramebuffer::mapFramebufferIntoGGTT()
             return false;
         }
 
+     /*
         IOLog("Physical segment: phys=0x%llX len=0x%llX\n",
               (uint64_t)segPhys, (uint64_t)segLen);
-
+*/
 
         for (IOByteCount segOff = 0;
              segOff < segLen && offset < fbSize;
@@ -1773,8 +2401,9 @@ bool FakeIrisXEFramebuffer::mapFramebufferIntoGGTT()
 
             uint64_t verify = ggtt[ggttIndex];
 
-            IOLog("   GGTT[%u] = 0x%016llX (verify=0x%016llX)\n",
+       /*    IOLog("   GGTT[%u] = 0x%016llX (verify=0x%016llX)\n",
                   ggttIndex, pte, verify);
+        */
         }
     }
 
@@ -1790,11 +2419,7 @@ bool FakeIrisXEFramebuffer::mapFramebufferIntoGGTT()
  
  
 void FakeIrisXEFramebuffer::disableController() {
-    if(!mmioBase) return;
-    
-    // Disable pipe (example offsets)
-    const uint32_t DSPACNTR = 0x70180;
-    *(volatile uint32_t*)(mmioBase + DSPACNTR) &= ~0x80000000;
+
     IOLog("Controller disabled\n");
 }
  
@@ -1955,55 +2580,6 @@ IOReturn FakeIrisXEFramebuffer::unregisterInterrupt(void* interruptRef) {
 
 
 
-/*
-
-void FakeIrisXEFramebuffer::vsyncTimerFired(OSObject* owner, IOTimerEventSource* sender)
-{
-    auto fb = OSDynamicCast(FakeIrisXEFramebuffer, owner);
-    if (!fb) return;
-
-    IOLockLock(fb->timerLock);
-
-    if (!fb->driverActive || fb->isInactive() || !fb->fullyInitialized) {
-        IOLockUnlock(fb->timerLock);
-        return;
-    }
-
-    // Optional: log trace or mark vsync time
-    IOLog("🔁 vsyncTimerFired\n");
-
-    // Notify vsync interrupt source
-    if (fb->vsyncSource) {
-        fb->vsyncSource->interruptOccurred(nullptr, nullptr, 0);
-    }
-
-    fb->deliverFramebufferNotification(0, kIOFBVsyncNotification, nullptr);
-
-    // Reschedule
-    if (fb->vsyncTimer && fb->driverActive) {
-        fb->vsyncTimer->setTimeoutMS(16); // simulate ~60Hz
-    }
-
-    IOLockUnlock(fb->timerLock);
-}
-
-
-    
-void FakeIrisXEFramebuffer::vsyncOccurred(OSObject* owner, IOInterruptEventSource* src, int count)
-{
-    auto fb = OSDynamicCast(FakeIrisXEFramebuffer, owner);
-        if (!fb) return;
-        // Notify WindowServer
-        fb->deliverFramebufferNotification(0, kIOFBVsyncNotification, nullptr);
-    }
-
-*/
-
-
-
-
-
-
 IOReturn FakeIrisXEFramebuffer::setDisplayMode(IODisplayModeID mode,
                                                IOIndex depth)
 {
@@ -2068,26 +2644,53 @@ IOReturn FakeIrisXEFramebuffer::setBounds(IOIndex index, IOGBounds *bounds) {
 
 IOReturn FakeIrisXEFramebuffer::clientMemoryForType(UInt32 type, UInt32* flags, IOMemoryDescriptor** memory)
 {
-    IOLog("FakeIrisXEFramebuffer::clientMemoryForType() - type: %u\n", type);
+    IOLog("🎨 clientMemoryForType: type=%u (0x%08X)\n", type, type);
 
-    if (!memory) return kIOReturnBadArgument;
+    // Define standard memory types (from IOFramebufferShared.h)
+    enum {
+        kIOFBSystemAperture  = 0,    // Main framebuffer memory
+        kIOFBCursorMemory    = 1,    // Cursor memory
+        kIOFBVRAMMemory      = 2     // General VRAM
+    };
 
-    // FIXED: Handle ALL types with framebufferMemory (shared for main/VRAM/cursor)
+    // System aperture (main framebuffer) - type 0
+    if (type == kIOFBSystemAperture) {
+        IODeviceMemory *devMem = getVRAMRange();
+        if (devMem) {
+            *memory = devMem;
+            if (flags) *flags = 0;
+            IOLog("✅ Returning system aperture memory\n");
+            return kIOReturnSuccess;
+        }
+    }
+    
+    // Cursor memory - type 1
     if (type == kIOFBCursorMemory && cursorMemory) {
         cursorMemory->retain();
         *memory = cursorMemory;
         if (flags) *flags = 0;
+        IOLog("✅ Returning cursor memory\n");
         return kIOReturnSuccess;
     }
-
-    if (framebufferMemory) {
-        framebufferMemory->retain();
-        *memory = framebufferMemory;
+    
+    // VRAM memory - type 2 (for textures/acceleration)
+    if (type == kIOFBVRAMMemory) {
+        if (textureMemory) {
+            // Return texture memory for acceleration
+            textureMemory->retain();
+            *memory = textureMemory;
+            IOLog("✅ Returning texture memory for acceleration\n");
+        } else {
+            // Fallback to main framebuffer
+            framebufferSurface->retain();
+            *memory = framebufferSurface;
+            IOLog("✅ Returning VRAM memory\n");
+        }
         if (flags) *flags = 0;
-        IOLog("clientMemoryForType: returning framebufferMemory for type %u\n", type);
         return kIOReturnSuccess;
     }
 
+    IOLog("❓ Unsupported memory type: 0x%08X\n", type);
     return kIOReturnUnsupported;
 }
 
@@ -2101,19 +2704,47 @@ IOReturn FakeIrisXEFramebuffer::performFlushNow()
 {
     IOLog("FakeIrisXEFB::performFlushNow(): running\n");
 
-    if (!framebufferMemory)
+    if (!framebufferMemory) {
+        IOLog("FakeIrisXEFB::performFlushNow(): no framebufferMemory\n");
         return kIOReturnNotReady;
+    }
 
-    void *dst = framebufferMemory->getBytesNoCopy();
-    if (!dst)
+    uint32_t *fb = (uint32_t *) framebufferMemory->getBytesNoCopy();
+    if (!fb) {
+        IOLog("FakeIrisXEFB::performFlushNow(): getBytesNoCopy() == nullptr\n");
         return kIOReturnError;
+    }
 
+    
+    /*
+    if (fExeclist) {
+        // small scratch batch, content will be filled in submitBatchWithExeclist
+        FakeIrisXEGEM* batchGem = FakeIrisXEGEM::withSize(64);
 
-    OSMemoryBarrier();
-
+        if (batchGem) {
+            if (fExeclist->submitBatchWithExeclist(
+                    this,
+                    batchGem,
+                    0,          // batchSize ignored now
+                    fRingRCS,
+                    2000))
+            {
+                IOLog("Flush: Real batch submitted — waiting on GPU fence\n");
+            } else {
+                IOLog("Flush: Batch submission failed\n");
+            }
+            batchGem->release();
+        }
+    }
+*/
+    
+    
+    
     IOLog("FakeIrisXEFB::performFlushNow(): done\n");
     return kIOReturnSuccess;
 }
+
+
 
 
 
@@ -2537,8 +3168,6 @@ IOReturn FakeIrisXEFramebuffer::getAttribute(
 
 
 
-
-
 IOReturn FakeIrisXEFramebuffer::getAttributeForConnection(
     IOIndex connect,
     IOSelect attribute,
@@ -2629,6 +3258,1205 @@ IOReturn FakeIrisXEFramebuffer::waitForAcknowledge(
     IOLog("waitForAcknowledge called\n");
     return kIOReturnSuccess;
 }
+
+
+
+
+FakeIrisXEGEM* FakeIrisXEFramebuffer::createTinyBatchGem()
+{
+    constexpr size_t sz = 4096;
+    FakeIrisXEGEM* gem = FakeIrisXEGEM::withSize(sz, 0);
+    if (!gem) return nullptr;
+
+    gem->pin();
+    uint32_t* buf = (uint32_t*)gem->memoryDescriptor()->getBytesNoCopy();
+    bzero(buf, sz);
+
+    // Basic MI_BATCH_BUFFER_END
+    buf[0] = 0xA << 23; // MI_BATCH_BUFFER_END opcode
+
+    return gem;
+}
+
+
+
+
+
+
+
+
+
+
+static inline uint32_t clamp_u32(uint32_t v, uint32_t lo, uint32_t hi) {
+    return (v < lo) ? lo : (v > hi) ? hi : v;
+}
+
+// Initialize backlight PWM hardware (call once from enableController)
+void FakeIrisXEFramebuffer::initBacklightHardware()
+{
+    auto rd = [&](uint32_t off) { return safeMMIORead(off); };
+    auto wr = [&](uint32_t off, uint32_t val) { safeMMIOWrite(off, val); };
+
+    // Write a sane period (max value) and start duty at 50%
+    // If you already do these writes in enableController, this is safe to call again.
+    const uint32_t period = 0x0000FFFFu;      // suggested period / pwmMax
+    const uint32_t duty50 = (period / 2) & 0xFFFFu;
+
+    // Set PWM period (low 16 bits typically)
+    wr(BXT_BLC_PWM_FREQ1, period);
+
+    // Set initial duty (low 16 bits)
+    wr(BXT_BLC_PWM_DUTY1, duty50);
+
+    // Enable PWM: set MSB (bit31) of CTL register (your snippet used 0x80000000)
+    uint32_t ctl = rd(BXT_BLC_PWM_CTL1);
+    ctl |= (1u << 31);
+    wr(BXT_BLC_PWM_CTL1, ctl);
+
+    IOLog("[FB] initBacklightHardware: period=0x%04x duty=0x%04x CTL=0x%08x\n", period & 0xFFFFu, duty50, ctl);
+}
+
+// Set brightness 0..100
+bool FakeIrisXEFramebuffer::setBacklightPercent(uint32_t percent)
+{
+    auto rd = [&](uint32_t off) { return safeMMIORead(off); };
+    auto wr = [&](uint32_t off, uint32_t val) { safeMMIOWrite(off, val); };
+
+
+    percent = clamp_u32(percent, 0, 100);
+
+    // Read period / max from FREQ1 low 16 bits if available
+    uint32_t freq = rd(BXT_BLC_PWM_FREQ1);
+    uint32_t pwmMax = freq & 0xFFFFu;
+    if (pwmMax == 0) {
+        // fallback to a sane default (match initBacklightHardware)
+        pwmMax = 0xFFFFu;
+    }
+
+    // compute duty (0..pwmMax)
+    uint32_t duty = (uint64_t)percent * pwmMax / 100u; // 64-bit to avoid overflow
+    duty &= 0xFFFFu;
+
+    // Write duty (some implementations place duty in low 16 bits)
+    // Some HW expects combined value (period<<16 | duty) — we only write duty because your snippet wrote 0x7FFF directly.
+    wr(BXT_BLC_PWM_DUTY1, duty);
+
+    // Ensure PWM enabled
+    uint32_t ctl = rd(BXT_BLC_PWM_CTL1);
+    if (!(ctl & (1u << 31))) {
+        ctl |= (1u << 31);
+        wr(BXT_BLC_PWM_CTL1, ctl);
+    }
+
+    IOLog("[FB] setBacklightPercent: %u%% -> duty=0x%04x (pwmMax=0x%04x)\n", percent, duty, pwmMax);
+    return true;
+}
+
+// Read current backlight as percent (0..100)
+uint32_t FakeIrisXEFramebuffer::getBacklightPercent()
+{
+    
+    auto rd = [&](uint32_t off) { return safeMMIORead(off); };
+    auto wr = [&](uint32_t off, uint32_t val) { safeMMIOWrite(off, val); };
+
+    uint32_t freq = rd(BXT_BLC_PWM_FREQ1);
+    uint32_t pwmMax = freq & 0xFFFFu;
+    if (pwmMax == 0) pwmMax = 0xFFFFu;
+    uint32_t duty = rd(BXT_BLC_PWM_DUTY1) & 0xFFFFu;
+
+    uint32_t percent = (uint64_t)duty * 100u / pwmMax;
+    return clamp_u32(percent, 0, 100);
+}
+
+
+
+
+
+
+
+
+
+
+
+#include "FakeIrisXEGEM.hpp"
+
+// GGTT PTE format helper: adapt to your PRM / i915_reg.h if you have PTE flags defined.
+// For typical Intel GGTT PTE: phys >> 12 | PTE_VALID | PTE_CACHE_BITS...
+static inline uint32_t make_ggtt_pte32(uint64_t phys) {
+    // Example: present bit = 1, set phys >> 12 in low bits
+    // For TGL you often need 64-bit PTEs; we write two 32-bit words if necessary.
+    uint32_t pte_low = (uint32_t)((phys & 0xFFFFFFFFULL) >> 12) | 0x1; // present
+    return pte_low;
+}
+static inline uint32_t make_ggtt_pte32_hi(uint64_t phys) {
+    return (uint32_t)((phys >> 44) & 0xFF); // platform dependent; keep simple
+}
+
+// Map a GEM into GGTT and return GPU VA (aligned to page). Thread-safe enough for bring up.
+uint64_t FakeIrisXEFramebuffer::ggttMap(FakeIrisXEGEM* gem) {
+    if (!gem || !fGGTT) return 0;
+
+    IOBufferMemoryDescriptor* md = gem->memoryDescriptor();
+    if (!md) {
+        IOLog("(FakeIrisXE) ggttMap: gem->memoryDescriptor() is NULL (gem=%p)\n", gem);
+        return 0;
+    }
+
+    // FIXED: Ensure GGTT is 64-bit array (TGL PTEs)
+    if (!fGGTT) {
+        IOLog("(FakeIrisXE) ggttMap: BAR1/GGTT not mapped yet (fBar1=%p)\n", fGGTT);
+        return 0;
+    }
+
+    uint32_t pages = gem->pageCount();
+    uint64_t gpuAddr = fNextGGTTOffset;  // in bytes
+    uint64_t offGPU = gpuAddr;
+
+    uint64_t offset = 0;
+    for (uint32_t i = 0; i < pages; ++i) {
+        uint64_t segSz = 0;
+        mach_vm_address_t phys = gem->getPhysicalSegment(offset, &segSz);
+        if (!phys) {
+            IOLog("FakeIrisXEFramebuffer: ggttMap - null phys seg at page %u\n", i);
+            return 0;
+        }
+
+        // FIXED: Index in pages (>>12)
+        uint64_t gtt_index = (offGPU >> 12);
+        if ((gtt_index + 1) * 8 > fGGTTSize) {  // FIXED: 8 bytes per 64-bit PTE
+            IOLog("FakeIrisXEFramebuffer: ggttMap - out of GGTT space\n");
+            return 0;
+        }
+
+        // FIXED: TGL 64-bit PTE (bits 63:0)
+        uint64_t pte_val = ((uint64_t)phys >> 12) & 0x0000FFFFFFFFF000ULL;  // Phys page in bits 56:12
+
+        pte_val |= (1ULL << 57);   // Valid bit (bit 57 = 1)
+        pte_val |= (0ULL << 59);   // 4KB page (exponent = 0)
+        pte_val |= (0ULL << 58);   // System memory (bit 58 = 0)
+        pte_val |= (0ULL << 2);    // PAT index 0 (WB cache)
+
+        // FIXED: Write full 64-bit PTE (no low/high split)
+        volatile uint64_t* pte_ptr = (volatile uint64_t*)fGGTT + gtt_index;
+        *pte_ptr = pte_val;
+
+        offGPU += 4096;
+        offset += segSz ? segSz : 4096;
+    }
+
+    // FIXED: Full flush (CPU + GPU cache)
+    __sync_synchronize();
+    safeMMIOWrite(0x1082C0, 1);  // GTT_WRITE_FLUSH (TGL required)
+
+    uint64_t ret = gpuAddr;
+    fNextGGTTOffset += ((uint64_t)pages << 12);
+    IOLog("FakeIrisXEFramebuffer: ggttMap -> GPU VA 0x%llx pages=%u (TGL PTEs)\n", (unsigned long long)ret, pages);
+    return ret;
+}
+
+
+
+
+
+void FakeIrisXEFramebuffer::ggttUnmap(uint64_t gpuAddr, uint32_t pages) {
+    if (!fGGTT) return;
+    uint64_t off = gpuAddr;
+    for (uint32_t i = 0; i < pages; ++i) {
+        uint64_t idx = (off >> 12);
+        if ((idx * 4 + 4) <= fGGTTSize) {
+            fGGTT[idx] = 0;
+            // if 64-bit PTE used, also clear next dword
+        }
+        off += 4096;
+    }
+    __sync_synchronize();
+    IOLog("FakeIrisXEFramebuffer: ggttUnmap GPU VA 0x%llx pages=%u\n", (unsigned long long)gpuAddr, pages);
+}
+
+
+
+
+// create ring: allocate GEM -> pin -> ggttMap -> program registers
+FakeIrisXERing* FakeIrisXEFramebuffer::createRcsRing(size_t ringBytes)
+{
+    IOLog("(FakeIrisXE) createRcsRing() size=%zu\n", ringBytes);
+
+    // If ring already exists — return it
+    if (fRingRCS != nullptr) {
+        IOLog("(FakeIrisXE) createRcsRing() — ring already exists @ %p\n", fRingRCS);
+        return fRingRCS;
+    }
+
+    // Allocate GEM buffer
+    FakeIrisXEGEM* ringGem = FakeIrisXEGEM::withSize(ringBytes, 0);
+    if (!ringGem) {
+        IOLog("❌ createRcsRing — GEM allocation failed\n");
+        return nullptr;
+    }
+
+    ringGem->pin();
+
+    // Map into GGTT
+    uint64_t ringGpuVA = ggttMap(ringGem);
+    if (ringGpuVA == 0) {
+        IOLog("❌ createRcsRing — GGTT mapping failed\n");
+        ringGem->unpin();
+        ringGem->release();
+        return nullptr;
+    }
+
+    // Create ring object
+    fRingRCS = new FakeIrisXERing(fBar0);   // mmio accessor
+    if (!fRingRCS) {
+        IOLog("❌ createRcsRing — ring object alloc failed\n");
+        return nullptr;
+    }
+
+    // Save metadata into ring object
+    fRingRCS->attachRingGPUAddress(ringGpuVA);
+    fRingSize = ringBytes;
+    fRingGpuVA = ringGpuVA;
+    fRingGem = ringGem;      // store GEM (so it doesn’t get freed)
+
+    // Program registers
+    fRingRCS->programRingBaseToHW();
+    fRingRCS->enableRing();            // RING_CTL = EN | size
+
+    IOLog("🟢 RCS ring created @ GPUVA=0x%llx size=%zu (ptr %p)\n",
+          (unsigned long long) ringGpuVA, ringBytes, fRingRCS);
+
+    return fRingRCS;
+}
+
+
+
+// Submit a batch GEM (already filled by caller) to RCS
+// - batchGem: GEM that contains the batch commands.
+// - batchOffsetBytes: offset into GEM where batch starts
+// - batchSizeBytes: length of the batch
+// Return: sequence number or 0 on failure
+uint32_t FakeIrisXEFramebuffer::submitBatch(FakeIrisXEGEM* batchGem, size_t batchOffsetBytes, size_t batchSizeBytes) {
+    if (!fRingRCS || !batchGem) {
+        IOLog("FakeIrisXEFramebuffer: submitBatch - bad args\n");
+        return 0;
+    }
+
+    // Ensure batch GEM is pinned and mapped into GGTT (if not, pin+map)
+    batchGem->pin();
+    uint64_t batchGpu = batchGem->gpuAddress(); // if your GEM stores GPU VA after ggttMap; else call ggttMap(batchGem)
+    if (batchGpu == 0) {
+        // If gpuAddress() not set, do a ggttMap here
+        batchGpu = ggttMap(batchGem);
+        if (batchGpu == 0) {
+            IOLog("FakeIrisXEFramebuffer: submitBatch - cannot get batch GPU VA\n");
+            batchGem->unpin();
+            return 0;
+        }
+    }
+
+    // Prepare fence: allocate if missing
+    if (!fFenceGEM) {
+        fFenceGEM = FakeIrisXEGEM::withSize(4096, 0);
+        if (!fFenceGEM) {
+            IOLog("FakeIrisXEFramebuffer: submitBatch - fence GEM alloc fail\n");
+            return 0;
+        }
+        fFenceGEM->pin();
+        uint64_t fenceGpu = ggttMap(fFenceGEM);
+        IOLog("FakeIrisXEFramebuffer: Fence GEM mapped at 0x%llx\n", (unsigned long long)fenceGpu);
+    }
+    uint64_t fenceGpuAddr = fFenceGEM->gpuAddress();
+    IOBufferMemoryDescriptor* fenceDesc = fFenceGEM->memoryDescriptor();
+    volatile uint32_t* fenceCpu = (volatile uint32_t*)fenceDesc->getBytesNoCopy();
+    // ensure fence is zero
+    fenceCpu[0] = 0;
+    __sync_synchronize();
+
+    // We need to ensure the batch ends with a MI_FLUSH_DW (POSTSYNC) writing a known value
+    // For a real driver we inject a MI_FLUSH_DW/POST_SYNC to fence address BEFORE MI_BATCH_BUFFER_END.
+    // Caller can include it; if not present we append an inline post-sync packet here.
+    // For safety we will not modify caller batch; instead the driver should require caller to
+    // include MI_FLUSH_DW or we can create a small chaining batch. Here we assume caller's batch
+    // already contains post-sync fence. If not, we can implement chain: create small tail-batch.
+    //
+    // For now: submit batchGpu directly.
+
+    // Push batch address into ring: use submitBatch64 (the ring helper we implemented)
+    bool ok = fRingRCS->submitBatch64(batchGpu);
+    if (!ok) {
+        IOLog("FakeIrisXEFramebuffer: submitBatch - ring submit failed\n");
+        batchGem->unpin();
+        return 0;
+    }
+
+    // LOG the submission
+    IOLog("FakeIrisXEFramebuffer: Batch submitted GPU 0x%llx size=%zu\n",
+          (unsigned long long)batchGpu, batchSizeBytes);
+
+    // Wait for fence to be written — *do not busy-loop in production*, here we poll with timeout,
+    // but the real production path should use interrupts and proper synchronization.
+    const int timeoutMs = 2000;
+    int waited = 0;
+    bool completed = false;
+    while (waited < timeoutMs) {
+        __sync_synchronize();
+        if (fenceCpu[0] != 0) { completed = true; break; }
+        IOSleep(1);
+        waited++;
+    }
+
+    if (completed) {
+        IOLog("FakeIrisXEFramebuffer: Batch fence completed value=0x%08x\n", fenceCpu[0]);
+    } else {
+        IOLog("FakeIrisXEFramebuffer: Batch fence TIMEOUT fence=0x%08x\n", fenceCpu[0]);
+    }
+
+    // cleanup: don't unpin fence (we keep it), unpin batch if temporary
+    batchGem->unpin();
+    return completed ? 1 : 0;
+}
+
+// CORRECTED MI packet definitions
+#ifndef MI_INSTR
+#define MI_INSTR(opcode, flags) (((opcode) << 23) | (flags))
+#endif
+
+#ifndef MI_BATCH_BUFFER_START
+#define MI_BATCH_BUFFER_START  MI_INSTR(0x31, 1)  // Flag bit 0 for address space
+#endif
+
+#ifndef MI_BATCH_BUFFER_END
+#define MI_BATCH_BUFFER_END    (0xA << 23)
+#endif
+
+#ifndef MI_STORE_DWORD_IMM
+#define MI_STORE_DWORD_IMM     MI_INSTR(0x20, 0)
+#endif
+
+#ifndef MI_USE_GGTT
+#define MI_USE_GGTT           (1 << 22)  // Use GGTT instead of PPGTT
+#endif
+
+#ifndef MI_FLUSH_DW
+#define MI_FLUSH_DW           MI_INSTR(0x26, 0)
+#endif
+
+#ifndef MI_NOOP
+#define MI_NOOP               (0 << 23)
+#endif
+
+
+// helper -- write 32-bit value into GEM CPU mapping
+static inline void write_u32_to_gem(IOBufferMemoryDescriptor* desc, size_t dwordIndex, uint32_t val) {
+    volatile uint32_t* p = (volatile uint32_t*)desc->getBytesNoCopy();
+    p[dwordIndex] = val;
+    __sync_synchronize();
+}
+
+// create a tiny tail batch that writes `seq` into fenceGpuAddr and ends
+// returns a pinned+GGTT-mapped tailGem (retained) and its GPU address in tailGpuOut
+static FakeIrisXEGEM* createTailBatchAndMap(FakeIrisXEFramebuffer* fb, uint64_t fenceGpuAddr, uint32_t seq, uint64_t* tailGpuOut) {
+    if (!fb || !tailGpuOut) return nullptr;
+
+    // allocate 4KB GEM for tail
+    FakeIrisXEGEM* tailGem = FakeIrisXEGEM::withSize(4096, 0);
+    if (!tailGem) {
+        IOLog("FakeIrisXEFramebuffer: createTailBatchAndMap - tail GEM alloc failed\n");
+        return nullptr;
+    }
+
+    IOBufferMemoryDescriptor* tailDesc = tailGem->memoryDescriptor();
+    if (!tailDesc) {
+        IOLog("FakeIrisXEFramebuffer: createTailBatchAndMap - no memoryDescriptor\n");
+        tailGem->release();
+        return nullptr;
+    }
+    bzero(tailDesc->getBytesNoCopy(), 4096);
+
+    // Build tail batch:
+    // [0] = MI_STORE_DWORD_IMM | MI_USE_GGTT
+    // [1] = seq (immediate)
+    // [2] = low32(fenceGpuAddr)
+    // [3] = high32(fenceGpuAddr)
+    // [4] = MI_BATCH_BUFFER_END
+
+    uint32_t* p = (uint32_t*)tailDesc->getBytesNoCopy();
+    p[0] = MI_STORE_DWORD_IMM | MI_USE_GGTT;
+    p[1] = seq;
+    p[2] = (uint32_t)(fenceGpuAddr & 0xFFFFFFFFULL);
+    p[3] = (uint32_t)(fenceGpuAddr >> 32);
+    p[4] = MI_BATCH_BUFFER_END;
+    // flush CPU writes
+    __sync_synchronize();
+
+    // pin and map into GGTT
+    tailGem->pin(); // void pin() per your GEM API
+    uint64_t tailGpu = fb->ggttMap(tailGem);
+    if (!tailGpu) {
+        IOLog("FakeIrisXEFramebuffer: createTailBatchAndMap - ggttMap(tail) failed\n");
+        tailGem->unpin();
+        tailDesc->release();
+        tailGem->release();
+        return nullptr;
+    }
+
+    IOLog("FakeIrisXEFramebuffer: tail batch created at GPU 0x%llx seq=%u\n", (unsigned long long)tailGpu, seq);
+    *tailGpuOut = tailGpu;
+    // keep tailDesc alive via tailGem (we will release tailDesc not here)
+    return tailGem;
+}
+
+// Create a master batch that does:
+//
+//   MI_BATCH_BUFFER_START (64-bit) -> userBatchGpu
+//   MI_BATCH_BUFFER_START (64-bit) -> tailGpu
+//   MI_BATCH_BUFFER_END
+//
+// This master batch is returned pinned+mapped as masterGem and its GPU address in masterGpuOut.
+static FakeIrisXEGEM* createMasterBatchChain(FakeIrisXEFramebuffer* fb, uint64_t userBatchGpu, uint64_t tailGpu, uint64_t* masterGpuOut) {
+    if (!fb || !masterGpuOut) return nullptr;
+
+    FakeIrisXEGEM* masterGem = FakeIrisXEGEM::withSize(4096, 0);
+    if (!masterGem) {
+        IOLog("FakeIrisXEFramebuffer: createMasterBatchChain - master GEM alloc failed\n");
+        return nullptr;
+    }
+
+    IOBufferMemoryDescriptor* masterDesc = masterGem->memoryDescriptor();
+    if (!masterDesc) {
+        IOLog("FakeIrisXEFramebuffer: createMasterBatchChain - no memoryDescriptor\n");
+        masterGem->release();
+        return nullptr;
+    }
+    bzero(masterDesc->getBytesNoCopy(), 4096);
+
+    uint32_t* p = (uint32_t*)masterDesc->getBytesNoCopy();
+    size_t idx = 0;
+
+    // MI_BATCH_BUFFER_START with 64-bit pointer: implementation dependent.
+    // We'll set the generic pattern: opcode + 64-bit address (low, high)
+    // If your platform requires a flag to indicate 64-bit, adjust below.
+    const uint32_t MBS_64 = MI_BATCH_BUFFER_START | (1u << 8); // (1<<8) used earlier as 64-bit flag (common)
+    p[idx++] = MBS_64;
+    p[idx++] = (uint32_t)(userBatchGpu & 0xFFFFFFFFULL);
+    p[idx++] = (uint32_t)(userBatchGpu >> 32);
+
+    p[idx++] = MBS_64;
+    p[idx++] = (uint32_t)(tailGpu & 0xFFFFFFFFULL);
+    p[idx++] = (uint32_t)(tailGpu >> 32);
+
+    p[idx++] = MI_BATCH_BUFFER_END;
+
+    __sync_synchronize();
+
+    masterGem->pin();
+    uint64_t masterGpu = fb->ggttMap(masterGem);
+    if (!masterGpu) {
+        IOLog("FakeIrisXEFramebuffer: createMasterBatchChain - ggttMap(master) failed\n");
+        masterGem->unpin();
+        masterDesc->release();
+        masterGem->release();
+        return nullptr;
+    }
+
+    IOLog("FakeIrisXEFramebuffer: master batch created at GPU 0x%llx (user=0x%llx tail=0x%llx)\n",
+          (unsigned long long)masterGpu, (unsigned long long)userBatchGpu, (unsigned long long)tailGpu);
+
+    *masterGpuOut = masterGpu;
+    return masterGem;
+}
+
+// Public function: chain-insert fence and submit master batch.
+// - userBatchGem: caller's batch GEM (already contains GPU commands and ends with MI_BATCH_BUFFER_END)
+// - userBatchOffsetBytes: offset into GEM (usually 0)
+// - userBatchSizeBytes: size of user batch region (for logging only)
+// Returns sequence number (non-zero) on success, 0 on failure.
+uint32_t FakeIrisXEFramebuffer::appendFenceAndSubmit(FakeIrisXEGEM* userBatchGem, size_t userBatchOffsetBytes, size_t userBatchSizeBytes) {
+    if (!userBatchGem || !fRingRCS) {
+        IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - invalid args\n");
+        return 0;
+    }
+
+    // 1) Ensure a fence object exists (one persistent fence GEM kept on the FB)
+    if (!fFenceGEM) {
+        fFenceGEM = FakeIrisXEGEM::withSize(4096, 0);
+        if (!fFenceGEM) {
+            IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - fence GEM alloc failed\n");
+            return 0;
+        }
+        fFenceGEM->pin();
+        uint64_t fenceGpu = ggttMap(fFenceGEM);
+        if (!fenceGpu) {
+            IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - fence ggttMap failed\n");
+            fFenceGEM->unpin();
+            fFenceGEM->release();
+            fFenceGEM = nullptr;
+            return 0;
+        }
+        // ensure initial fence value = 0
+        IOBufferMemoryDescriptor* fd = fFenceGEM->memoryDescriptor();
+        if (fd) {
+            volatile uint32_t* fenceCpu = (volatile uint32_t*)fd->getBytesNoCopy();
+            fenceCpu[0] = 0;
+            __sync_synchronize();
+        }
+        IOLog("FakeIrisXEFramebuffer: fence precreated at GPU 0x%llx\n", (unsigned long long)fenceGpu);
+    }
+
+    // 2) Build a tail batch that writes a unique seq into fence
+    static atomic_uint_fast32_t global_seq = 1;
+    uint32_t seq = (uint32_t)atomic_fetch_add(&global_seq, 1);
+    IOBufferMemoryDescriptor* fenceDesc = fFenceGEM->memoryDescriptor();
+    uint64_t fenceGpu = fFenceGEM->physicalAddress(); // prefer gpuAddress if you set it; use physicalAddress if placeholder
+    // If you have proper fFenceGEM->gpuAddress(), prefer that:
+    if (fFenceGEM->gpuAddress()) fenceGpu = fFenceGEM->gpuAddress();
+
+    uint64_t tailGpuAddr = 0;
+    FakeIrisXEGEM* tailGem = createTailBatchAndMap(this, fenceGpu, seq, &tailGpuAddr);
+    if (!tailGem) {
+        IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - createTailBatch failed\n");
+        return 0;
+    }
+
+    // 3) Ensure user batch is pinned and mapped (pin if needed). We will map to GPU VA if not present.
+    userBatchGem->pin();
+    uint64_t userGpu = userBatchGem->gpuAddress();
+    if (!userGpu) {
+        userGpu = ggttMap(userBatchGem);
+        if (!userGpu) {
+            IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - ggttMap(user) failed\n");
+            tailGem->unpin();
+            tailGem->release();
+            userBatchGem->unpin();
+            return 0;
+        }
+    }
+
+    // 4) Build master chain batch that jumps into user batch then tail
+    uint64_t masterGpuAddr = 0;
+    FakeIrisXEGEM* masterGem = createMasterBatchChain(this, userGpu + userBatchOffsetBytes, tailGpuAddr, &masterGpuAddr);
+    if (!masterGem) {
+        IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - master chain creation failed\n");
+        tailGem->unpin();
+        tailGem->release();
+        userBatchGem->unpin();
+        return 0;
+    }
+
+    // 5) Submit master batch (this will execute user batch then tail in order)
+    bool ok = fRingRCS->submitBatch64(masterGpuAddr);
+    if (!ok) {
+        IOLog("FakeIrisXEFramebuffer: appendFenceAndSubmit - ring submit failed\n");
+        masterGem->unpin(); masterGem->release();
+        tailGem->unpin(); tailGem->release();
+        userBatchGem->unpin();
+        return 0;
+    }
+
+    IOLog("FakeIrisXEFramebuffer: Batch submitted (master=0x%llx user=0x%llx tail=0x%llx) seq=%u\n",
+          (unsigned long long)masterGpuAddr, (unsigned long long)userGpu, (unsigned long long)tailGpuAddr, seq);
+
+    // Do not release master/tail immediately — keep them alive until fence observed to avoid reuse.
+    // We can store them in a small list or release after fence observed in IRQ handler.
+    // For simplicity keep refs in a tiny list (you should implement proper cleanup).
+    // For now: keep masterGem and tailGem retained and rely on periodic cleanup / reboot (for bring-up).
+    // (Production: add list<active_submission> and cleanup when fence observed.)
+
+    return seq;
+}
+
+
+
+
+
+
+// IOCommandGate deferred cleanup action
+static IOReturn deferredCleanupAction(OSObject* owner,
+                                      void* arg0,
+                                      void* arg1,
+                                      void* arg2,
+                                      void* arg3)
+{
+    FakeIrisXEFramebuffer* self = OSDynamicCast(FakeIrisXEFramebuffer, owner);
+    if (!self) return kIOReturnBadArgument;
+
+    uint32_t seq = (uint32_t)(uintptr_t)arg0;
+    bool ok = self->completePendingSubmission(seq);
+    IOLog("FakeIrisXEFramebuffer: deferredCleanup seq=%u ok=%d\n", seq, (int)ok);
+    return kIOReturnSuccess;
+}
+
+
+
+
+bool FakeIrisXEFramebuffer::waitForExeclistEvent(uint32_t timeoutMs)
+{
+    if (!fCmdGate) return false;
+
+    IOReturn ret = fCmdGate->commandSleep(fSleepToken, timeoutMs);
+    return (ret == THREAD_AWAKENED);
+}
+
+
+
+
+
+#define mmio_read32(bar, off)    (*(volatile uint32_t*)((uint8_t*)(bar) + (off)))
+#define mmio_write32(bar, off, v) (*(volatile uint32_t*)((uint8_t*)(bar) + (off)) = (uint32_t)(v))
+
+// ---------------------------------------------------------------------------
+// Interrupt handler - minimal; runs in workloop context (via IOInterruptEventSource)
+void FakeIrisXEFramebuffer::handleInterrupt(IOInterruptEventSource* /*src*/, int /*count*/) {
+   
+    if (!fBar0)
+        return;
+
+    // Read engine-specific interrupt identity (RCS engine)
+    uint32_t iir = mmio_read32(fBar0, RCS0_IIR);
+    if (iir == 0) {
+        // nothing for RCS, return quickly
+        return;
+    }
+
+    // Acknowledge/clear the handled bits (write-to-clear)
+    mmio_write32(fBar0, RCS0_ICR, iir);
+
+    IOLog("FakeIrisXEFramebuffer: RCS IRQ IIR=0x%08x\n", iir);
+
+    if (fExeclist) {
+           fExeclist->engineIrq(iir);
+       }
+
+       if (iir & RCS_INTR_FAULT) {
+           IOLog("FakeIrisXEFramebuffer: RCS FAULT bit set! IIR=0x%08x\n", iir);
+       }
+
+       if (iir & RCS_INTR_CTX_SWITCH) {
+           IOLog("FakeIrisXEFramebuffer: RCS CTX SWITCH\n");
+       }
+       if (iir & RCS_INTR_USER) {
+           IOLog("FakeIrisXEFramebuffer: RCS USER EVENT\n");
+       }
+
+
+
+    // Handle completion bit only (conservative)
+    if (iir & RCS_INTR_COMPLETE) {
+        if (fFenceGEM) {
+            IOBufferMemoryDescriptor* desc = fFenceGEM->memoryDescriptor();
+            if (desc) {
+                volatile uint32_t* fenceCpu =
+                    (volatile uint32_t*)desc->getBytesNoCopy();
+                uint32_t val = fenceCpu[0];
+
+                IOLog("FakeIrisXEFramebuffer: IRQ - fenceCpu[0]=0x%08x\n", val);
+
+                if (val != 0) {
+                    // reset fence immediately (optional)
+                    fenceCpu[0] = 0;
+                    __sync_synchronize();
+
+                    if (fCmdGate) {
+                        // Defer cleanup to gate
+                        fCmdGate->runAction(
+                            deferredCleanupAction,
+                            (void*)(uintptr_t)val,  // arg0: seq
+                            nullptr, nullptr, nullptr);
+                    } else {
+                        // Fallback: direct cleanup (less ideal but safe-ish)
+                        bool cleaned = completePendingSubmission(val);
+                        IOLog("FakeIrisXE: direct cleanup seq=%u result=%d\n",
+                              val, (int)cleaned);
+                    }
+                }
+            }
+        } else {
+            IOLog("FakeIrisXEFramebuffer: IRQ - complete but no fFenceGEM\n");
+        }
+    }
+
+    // Handle fault bits conservatively: just log
+    if (iir & RCS_INTR_FAULT) {
+        IOLog("FakeIrisXEFramebuffer: RCS FAULT bit set! IIR=0x%08x\n", iir);
+    }
+
+    // Optionally handle CTX_SWITCH / USER bits (log only)
+    if (iir & RCS_INTR_CTX_SWITCH) {
+        IOLog("FakeIrisXEFramebuffer: RCS CTX SWITCH\n");
+    }
+    if (iir & RCS_INTR_USER) {
+        IOLog("FakeIrisXEFramebuffer: RCS USER EVENT\n");
+    }
+    
+    if (fCmdGate)
+        fCmdGate->commandWakeup(fSleepToken);
+
+}
+
+
+
+// Create an OSDictionary entry for a submission
+
+
+// Create an OSDictionary entry for a submission
+static OSDictionary* createSubmissionEntry(uint32_t seq,
+                                           FakeIrisXEGEM* master,
+                                           FakeIrisXEGEM* tail)
+{
+    OSDictionary* dict = OSDictionary::withCapacity(4);
+    if (!dict) return nullptr;
+
+    // seq
+    OSNumber* nseq = OSNumber::withNumber(seq, 32);
+    dict->setObject("seq", nseq);
+    nseq->release();
+
+    // master GEM pointer
+    if (master) {
+        master->retain();
+        FakeIrisXEGEM* tmp = master;
+        OSData* md = OSData::withBytes(&tmp, sizeof(tmp));
+        dict->setObject("master", md);
+        md->release();
+    }
+
+    // tail GEM pointer
+    if (tail) {
+        tail->retain();
+        FakeIrisXEGEM* tmp = tail;
+        OSData* td = OSData::withBytes(&tmp, sizeof(tmp));
+        dict->setObject("tail", td);
+        td->release();
+    }
+
+    return dict;
+}
+
+// Add pending submission (thread-safe)
+bool FakeIrisXEFramebuffer::addPendingSubmission(uint32_t seq,
+                                                 FakeIrisXEGEM* master,
+                                                 FakeIrisXEGEM* tail)
+{
+    if (!fPendingSubmissions || !fPendingLock)
+        return false;
+
+    IOLockLock(fPendingLock);
+    OSDictionary* e = createSubmissionEntry(seq, master, tail);
+    if (e) {
+        fPendingSubmissions->setObject(e);
+        e->release(); // OSArray retained it
+    IOLockUnlock(fPendingLock);
+        IOLog("FakeIrisXEFramebuffer: addPendingSubmission seq=%u\n", seq);
+        return true;
+    }
+IOLockUnlock(fPendingLock);
+    return false;
+}
+
+// Find and remove submission by seq. Returns true if found and cleaned up.
+bool FakeIrisXEFramebuffer::completePendingSubmission(uint32_t seq)
+{
+    if (!fPendingSubmissions || !fPendingLock)
+        return false;
+
+    bool found = false;
+    IOLockLock(fPendingLock);
+
+    for (unsigned i = 0; i < fPendingSubmissions->getCount(); ++i) {
+        OSDictionary* dict =
+            OSDynamicCast(OSDictionary, fPendingSubmissions->getObject(i));
+        if (!dict) continue;
+
+        OSNumber* nseq =
+            OSDynamicCast(OSNumber, dict->getObject("seq"));
+        if (!nseq) continue;
+
+        if (nseq->unsigned32BitValue() == seq) {
+            // master
+            OSData* md = OSDynamicCast(OSData, dict->getObject("master"));
+            if (md && md->getLength() == sizeof(FakeIrisXEGEM*)) {
+                FakeIrisXEGEM* master = nullptr;
+                memcpy(&master, md->getBytesNoCopy(), sizeof(master));
+                if (master) {
+                    master->unpin();
+                    master->release();
+                }
+            }
+
+            // tail
+            OSData* td = OSDynamicCast(OSData, dict->getObject("tail"));
+            if (td && td->getLength() == sizeof(FakeIrisXEGEM*)) {
+                FakeIrisXEGEM* tail = nullptr;
+                memcpy(&tail, td->getBytesNoCopy(), sizeof(tail));
+                if (tail) {
+                    tail->unpin();
+                    tail->release();
+                }
+            }
+
+            fPendingSubmissions->removeObject(i);
+            found = true;
+            IOLog("FakeIrisXEFramebuffer: completePendingSubmission seq=%u cleaned\n", seq);
+            break;
+        }
+    }
+
+IOLockUnlock(fPendingLock);
+    return found;
+}
+
+// Optional: cleanup all pending submissions (called at stop())
+void FakeIrisXEFramebuffer::cleanupAllPendingSubmissions()
+{
+    if (!fPendingSubmissions || !fPendingLock)
+        return;
+
+    IOLockLock(fPendingLock);
+
+    while (fPendingSubmissions->getCount() > 0) {
+        OSDictionary* dict =
+            OSDynamicCast(OSDictionary, fPendingSubmissions->getObject(0));
+        if (!dict) {
+            fPendingSubmissions->removeObject(0);
+            continue;
+        }
+
+        OSData* md = OSDynamicCast(OSData, dict->getObject("master"));
+        if (md && md->getLength() == sizeof(FakeIrisXEGEM*)) {
+            FakeIrisXEGEM* master = nullptr;
+            memcpy(&master, md->getBytesNoCopy(), sizeof(master));
+            if (master) {
+                master->unpin();
+                master->release();
+            }
+        }
+
+        OSData* td = OSDynamicCast(OSData, dict->getObject("tail"));
+        if (td && td->getLength() == sizeof(FakeIrisXEGEM*)) {
+            FakeIrisXEGEM* tail = nullptr;
+            memcpy(&tail, td->getBytesNoCopy(), sizeof(tail));
+            if (tail) {
+                tail->unpin();
+                tail->release();
+            }
+        }
+
+        fPendingSubmissions->removeObject(0);
+    }
+
+IOLockUnlock(fPendingLock);
+}
+
+
+
+
+// ============================================================
+// Create a minimal valid Intel batch buffer:
+//   MI_NOOP
+//   MI_BATCH_BUFFER_END
+//
+// Returns a 4KB GEM object ready for pin+submit.
+// ============================================================
+
+FakeIrisXEGEM* FakeIrisXEFramebuffer::createSimpleUserBatch()
+{
+    // 1 page (4096 bytes) is plenty
+    const size_t batchSize = 4096;
+
+    FakeIrisXEGEM* gem = FakeIrisXEGEM::withSize(batchSize, 0);
+    if (!gem) {
+        IOLog("FakeIrisXE: createSimpleUserBatch FAILED (alloc)\n");
+        return nullptr;
+    }
+
+    IOBufferMemoryDescriptor* desc = gem->memoryDescriptor();
+    if (!desc) {
+        IOLog("FakeIrisXE: createSimpleUserBatch FAILED (desc)\n");
+        gem->release();
+        return nullptr;
+    }
+
+    // CPU mapping
+    uint8_t* cpu = (uint8_t*)desc->getBytesNoCopy();
+    if (!cpu) {
+        IOLog("FakeIrisXE: createSimpleUserBatch FAILED (cpu map)\n");
+        gem->release();
+        return nullptr;
+    }
+
+    // Zero entire batch page
+    bzero(cpu, batchSize);
+
+   
+    uint32_t* dwords = (uint32_t*)cpu;
+
+    dwords[0] = MI_NOOP;
+    dwords[1] = MI_BATCH_BUFFER_END;
+
+    __sync_synchronize();
+
+    IOLog("FakeIrisXE: createSimpleUserBatch OK (size=%lu)\n", batchSize);
+    return gem;
+}
+
+
+
+
+// Safe read-only dump of IRQ and ring registers - NO writes, safe
+void FakeIrisXEFramebuffer::dumpIRQAndRingRegsSafe() {
+    if (!fBar0) {
+        IOLog("FakeIrisXE: dumpRegs - no BAR0\n");
+        return;
+    }
+
+    auto r = [&](uint32_t off)->uint32_t {
+        volatile uint32_t* p = (volatile uint32_t*)((uint8_t*)fBar0 + off);
+        return *p;
+    };
+
+    IOLog("=== FakeIrisXE: IRQ & Ring registers snapshot ===\n");
+    IOLog("RCS0_IIR  = 0x%08x\n", r(RCS0_IIR));
+    IOLog("RCS0_ICR  = 0x%08x\n", r(RCS0_ICR));
+    IOLog("RCS0_IER  = 0x%08x\n", r(RCS0_IER));
+    IOLog("RCS0_IMR  = 0x%08x\n", r(RCS0_IMR));
+    IOLog("GEN11_GFX_MSTR_IRQ      = 0x%08x\n", r(GEN11_GFX_MSTR_IRQ));
+    IOLog("GEN11_GFX_MSTR_IRQ_MASK = 0x%08x\n", r(GEN11_GFX_MSTR_IRQ_MASK));
+
+    
+    
+    // Ring registers (RCS)
+    IOLog("RING_HEAD = 0x%08x\n", r(RING_HEAD));
+    IOLog("RING_TAIL = 0x%08x\n", r(RING_TAIL));
+    IOLog("RING_CTL  = 0x%08x\n", r(RING_CTL));
+    IOLog("RING_BASE_LO = 0x%08x\n", r(RING_BASE_LO));
+    IOLog("RING_BASE_HI = 0x%08x\n", r(RING_BASE_HI));
+
+    IOLog("=================================================\n");
+
+     }
+
+
+
+// --- SAFE IRQ enabling sequence ---
+// Preconditions: fWorkLoop && fInterruptSource added to workloop && fFenceGEM present
+void FakeIrisXEFramebuffer::enableRcsInterruptsSafely() {
+    if (!fBar0 || !mmioMap) {
+        IOLog("FakeIrisXE: cannot enable IRQs - no BAR0/mmio\n");
+        return;
+    }
+    if (!fWorkLoop || !fInterruptSource) {
+        IOLog("FakeIrisXE: cannot enable IRQs - missing workloop/interrupt source\n");
+        return;
+    }
+    if (!fFenceGEM || !fFenceGEM->memoryDescriptor()) {
+        IOLog("FakeIrisXE: cannot enable IRQs - missing fence GEM/desc\n");
+        return;
+    }
+
+    IOLog("FakeIrisXE: starting SAFE IRQ enable sequence\n");
+
+    // 0) Safety: ensure GT is awake and FORCEWAKE ack present
+    uint32_t forcewake = safeMMIORead(0x130044); // adjust if you used others
+    if ((forcewake & 0xF) == 0) {
+        IOLog("FakeIrisXE: FORCEWAKE not acked (0x%08x) - abort IRQ enable\n", forcewake);
+        return;
+    }
+
+    // 1) Mask master -> stop any HW from pushing interrupts to host while we set things
+    safeMMIOWrite(GEN11_GFX_MSTR_IRQ_MASK, 0xFFFFFFFFu);
+    IOSleep(1); // small delay for posted writes to drain
+    (void)safeMMIORead(GEN11_GFX_MSTR_IRQ_MASK); // readback
+
+    // 2) Mask ring-level IMR and IER and ack pending (conservative)
+    // Use read-modify-write to avoid clobbering bits if platform uses different semantics
+    safeMMIOWrite(RCS0_IER, 0x0);     // clear engine IER first
+    safeMMIOWrite(RCS0_IMR, 0xFFFFFFFFu); // mask engine-level IMR (disable)
+    safeMMIOWrite(RCS0_ICR, 0xFFFFFFFFu); // ack/clear any pending ICR (write-to-clear)
+    (void)safeMMIORead(RCS0_ICR); // readback ordering
+    IOSleep(1);
+
+    // 3) Verify safe register snapshot BEFORE unmasking anything
+    IOLog("FakeIrisXE: IRQ snapshot before enabling:\n");
+    dumpIRQAndRingRegsSafe(); // your read-only snapshot function
+
+    // 4) Enable the driver side handler: make sure the interrupt source is enabled on the workloop.
+    //    We enable it *after* masking the HW master/engine so the first interrupt won't be delivered until we're ready.
+    //    Note: fWorkLoop->addEventSource(fInterruptSource) must already have been called.
+    fInterruptSource->disable(); // ensure disabled while we finish setup (safe no-op if already disabled)
+    // safe to call enable() later after masks/unmasks done.
+
+    // 5) Prepare the ring/fence state required by handler: ensure fence is zeroed and in memory
+    IOBufferMemoryDescriptor* fenceDesc = fFenceGEM->memoryDescriptor();
+    if (fenceDesc) {
+        volatile uint32_t* fenceCpu = (volatile uint32_t*)fenceDesc->getBytesNoCopy();
+        fenceCpu[0] = 0;
+        __sync_synchronize();
+    }
+
+    // 6) Now set the engine IER via read/modify/write (so we don't accidentally clear bits)
+    uint32_t cur_ier = safeMMIORead(RCS0_IER);
+    uint32_t new_ier = cur_ier | RCS_INTR_COMPLETE; // only enable completion bit
+    safeMMIOWrite(RCS0_IER, new_ier);
+    (void)safeMMIORead(RCS0_IER); // readback
+
+    IOSleep(1); // let HW settle
+
+    // 7) Unmask engine-level IMR (clear mask)
+    // If your platform uses 0 to unmask (typical), do this. If it uses another encoding, adapt.
+    safeMMIOWrite(RCS0_IMR, 0x0);
+    (void)safeMMIORead(RCS0_IMR);
+    IOSleep(1);
+
+    // 8) Clear GT master pending bits, then unmask master interrupts last
+    safeMMIOWrite(GEN11_GFX_MSTR_IRQ, 0xFFFFFFFFu); // ack/clear any pending master IRQs
+    (void)safeMMIORead(GEN11_GFX_MSTR_IRQ);
+
+    // 9) Unmask master interrupts (allow host interrupts once everything ready)
+    safeMMIOWrite(GEN11_GFX_MSTR_IRQ_MASK, 0x0u);
+    (void)safeMMIORead(GEN11_GFX_MSTR_IRQ_MASK);
+    IOSleep(1);
+
+    // 10) Finally enable the macOS interrupt source on the workloop
+    fInterruptSource->enable();
+    IOLog("FakeIrisXE: IRQ enable completed (RCS0_IER=0x%08x)\n", safeMMIORead(RCS0_IER));
+}
+
+
+
+
+
+
+
+// register addresses (verify with your offsets / defines)
+#define REG_FORCEWAKE_REQ   0x00A278  // FORCEWAKE02 (request)
+#define REG_FORCEWAKE_ACK   0x130044  // FORCEWAKE02_ACK (ack)
+#define REG_RCS0_IER        0x2604
+
+
+
+bool FakeIrisXEFramebuffer::forcewakeRenderHold(uint32_t timeoutMs)
+{
+    IOLog("(FakeIrisXE) forcewakeRenderHold(): TigerLake RENDER-domain wake\n");
+
+    // Tiger Lake actually uses only lower 4 bits (Render FW domain)
+    const uint32_t FW_REQ   = 0xA188;    // same register, but limited domain
+    const uint32_t FW_ACK   = 0x130044;
+    const uint32_t FW_MASK  = 0x000F000F; // only 4 LSB active on this laptop
+
+    safeMMIOWrite(FW_REQ, FW_MASK);
+    (void)safeMMIORead(FW_REQ);
+
+    uint32_t elapsed = 0;
+    while (elapsed < timeoutMs) {
+        uint32_t ack = safeMMIORead(FW_ACK);
+
+        // Only lower 4 bits matter (Render domain)
+        if ((ack & FW_MASK) == 0xF) {
+            IOLog("(FakeIrisXE) Render forcewake OK (ACK=0x%08X)\n", ack);
+            return true;
+        }
+
+        IODelay(1000);
+        elapsed++;
+    }
+
+    uint32_t final = safeMMIORead(FW_ACK);
+    IOLog("❌ Render forcewake TIMEOUT (ACK=0x%08X)\n", final);
+    return false;
+}
+
+
+
+
+
+
+
+void FakeIrisXEFramebuffer::forcewakeRenderRelease()
+{
+    const uint32_t FW_REQ = 0xA188;
+    safeMMIOWrite(FW_REQ, 0x0);
+    (void)safeMMIORead(FW_REQ);
+    IOSleep(1);
+}
+
+
+
+void FakeIrisXEFramebuffer::ensureEngineInterrupts()
+{
+    // Minimal IER bits - keep the HW able to wake itself when context/switch events happen.
+    const uint32_t ENGINE_USER_INTERRUPT = (1U << 12); // example bit; check PRM for exact bit names
+    const uint32_t CSB_UPDATE_INTERRUPT  = (1U << 16); // example bit; adjust per PRM
+    uint32_t ier = ENGINE_USER_INTERRUPT | CSB_UPDATE_INTERRUPT;
+
+    IOLog("(FakeIrisXE) ensureEngineInterrupts(): setting IER=0x%08x\n", ier);
+    safeMMIOWrite(REG_RCS0_IER, ier);
+    // Optionally set IMR = ~ier to only allow those interrupts
+    // mmioWrite32(REG_RCS0_IMR, ~ier);
+}
+
+
+#include "embedded_firmware.h"
+
+bool FakeIrisXEFramebuffer::initGuCSystem()
+{
+    IOLog("(FakeIrisXE) Initializing GuC system\n");
+    
+    // 1. Create GuC manager
+    fGuC = FakeIrisXEGuC::withOwner(this);
+    if (!fGuC) {
+        IOLog("(FakeIrisXE) Failed to create GuC manager\n");
+        return false;
+    }
+    
+    // 2. Initialize hardware
+    if (!fGuC->initGuC()) {
+        IOLog("(FakeIrisXE) GuC hardware init failed\n");
+        return false;
+    }
+    
+    // 3. Load firmware from EMBEDDED arrays (not from resources)
+    // Use your embedded arrays directly
+    
+    // Check if GuC firmware is embedded
+    if (!tgl_guc_70_1_1_bin || tgl_guc_70_1_1_bin_len == 0) {
+        IOLog("(FakeIrisXE) ❌ Embedded GuC firmware not available\n");
+        return false;
+    }
+    
+    // Load GuC firmware from embedded array
+    if (!fGuC->loadGuCFirmware(tgl_guc_70_1_1_bin, tgl_guc_70_1_1_bin_len)) {
+        IOLog("(FakeIrisXE) Failed to load GuC firmware\n");
+        return false;
+    }
+    
+    // Load HuC firmware from embedded array (if available)
+    if (tgl_huc_7_9_3_bin && tgl_huc_7_9_3_bin_len > 0) {
+        if (!fGuC->loadHuCFirmware(tgl_huc_7_9_3_bin, tgl_huc_7_9_3_bin_len)) {
+            IOLog("(FakeIrisXE) Failed to load HuC firmware (optional)\n");
+            // Continue anyway, HuC is optional
+        }
+    } else {
+        IOLog("(FakeIrisXE) HuC firmware not embedded (optional)\n");
+    }
+    
+    // 4. Enable GuC submission
+    if (!fGuC->enableGuCSubmission()) {
+        IOLog("(FakeIrisXE) Failed to enable GuC submission\n");
+        // Fall back to legacy mode
+        return false;
+    }
+    
+    IOLog("(FakeIrisXE) GuC system initialized successfully\n");
+    return true;
+}
+
+
+
+
+
+
+
+
 
 
 #include <libkern/libkern.h> // For kern_return_t, kmod_info_t
