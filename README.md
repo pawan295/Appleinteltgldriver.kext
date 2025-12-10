@@ -99,12 +99,12 @@ Kernel sees CLEAR commands
 
 The remaining steps are:
 
-1. GEM buffer objects
-2. GGTT binder
-3. Command streamer ring
-4. Execlists context
-5. GuC firmware
-6. BLT engine
+1. GEM buffer objects (Done)
+2. GGTT binder  (Done)
+3. Command streamer ring (Done)
+4. Execlists context (Done) currently not working
+5. GuC firmware (Stub)
+6. BLT engine (Future)
 7. 3D pipeline
 8. Metal integration
 These are huge, but not unknown.
