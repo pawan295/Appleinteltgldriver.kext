@@ -1,58 +1,48 @@
-#ifndef FAKE_IRIS_XE_ACCELERATOR_USERCLIENT_HPP
-#define FAKE_IRIS_XE_ACCELERATOR_USERCLIENT_HPP
+#ifndef FAKE_IRIS_XE_ACCEL_USERCLIENT_HPP
+#define FAKE_IRIS_XE_ACCEL_USERCLIENT_HPP
 
 #include <IOKit/IOUserClient.h>
-#include <IOKit/IOLib.h>
-#include "FakeIrisXEAccelShared.h"
 
 class FakeIrisXEAccelerator;
+class FakeIrisXEGEM;
+class GEMHandleTable;   // GLOBAL forward declaration
 
 class FakeIrisXEAcceleratorUserClient : public IOUserClient {
     OSDeclareDefaultStructors(FakeIrisXEAcceleratorUserClient);
 
-private:
-    task_t                         fTask{nullptr};
-    FakeIrisXEAccelerator*         fOwner{nullptr};
-
-    IOBufferMemoryDescriptor*      fSharedMem{nullptr};   // kernel-owned buffer we hand to userspace (clientMemoryForType)
-    volatile XEHdr*                fSharedHdr{nullptr};   // header inside fSharedMem
-    uint8_t*                       fRingBase{nullptr};    // pointer to ring payload (after header)
-
 public:
-    // Kernel IOKit signature (3 args) — correct for kernel builds
     bool initWithTask(task_t owningTask, void* securityID, UInt32 type) override;
-
     bool start(IOService* provider) override;
     void stop(IOService* provider) override;
 
     IOReturn clientClose() override;
-    
-    IOReturn doInjectTest();   // <<< YOU MUST ADD THIS
-
-
     IOReturn externalMethod(uint32_t selector,
                             IOExternalMethodArguments* args,
                             IOExternalMethodDispatch* dispatch,
-                            OSObject* target,
-                            void* ref) override;
+                            OSObject* target, void* reference) override;
 
-    // map shared buffer into user task memory
-    IOReturn clientMemoryForType(uint32_t type, IOOptionBits* options, IOMemoryDescriptor** mem) override;
-    
-    
-      
+    IOReturn clientMemoryForType(UInt32 type, UInt32 *flags, IOMemoryDescriptor **memory) override;
+
     
     
     
+private:
+    FakeIrisXEAccelerator* fOwner;
+    task_t fTask;
+
+    // GEM
+    GEMHandleTable* fHandleTable = nullptr;
+    uint32_t fLastRequestedGemHandle = 0;
+
+    uint32_t createGemAndRegister(uint64_t size, uint32_t flags);
+    bool destroyGemHandle(uint32_t handle);
+    IOReturn pinGemHandle(uint32_t handle, uint64_t* outGpuAddr);
+    bool unpinGemHandle(uint32_t handle);
+    IOReturn getPhysPagesForHandle(uint32_t handle, void* outBuf, size_t* outSize);
     
     
     
-    
+
 };
 
-
-
-
-
 #endif
-
