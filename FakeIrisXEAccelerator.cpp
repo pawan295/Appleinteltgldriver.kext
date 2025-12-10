@@ -98,7 +98,6 @@ bool FakeIrisXEAccelerator::start(IOService* provider) {
         return false;
     }
 
-    
     // advertise ourselves to IOAccelFamily / OS
     setProperty("MetalSupported", true);
     setProperty("IOAccelFamily", true);
@@ -838,4 +837,44 @@ bool FakeIrisXEAccelerator::presentContext(uint32_t ctxId)
 
     IOLog("(FakeIrisXEFramebuffer) [Accel] presentContext ctx=%u copied %u x %u, scheduled flush\n", ctxId, copy_w, copy_h);
     return true;
+}
+
+
+bool FakeIrisXEAccelerator::submitGpuBatchForCtx(uint32_t ctxId,
+                                                 FakeIrisXEGEM* batchGem,
+                                                 uint32_t priority)
+{
+    if (!fFB || !fFB->fExeclist || !batchGem)
+        return false;
+
+    FakeIrisXEExeclist* ex = fFB->fExeclist;
+
+    FakeIrisXEExeclist::XEHWContext* hw = ex->lookupHwContext(ctxId);
+    if (!hw) {
+        hw = ex->createHwContextFor(ctxId, priority);
+        if (!hw) {
+            IOLog("(FakeIrisXEFramebuffer) [Accel] submitGpuBatchForCtx: createHwContextFor FAILED\n");
+            return false;
+        }
+    }
+
+    return ex->submitForContext(hw, batchGem);
+}
+
+
+void FakeIrisXEAccelerator::linkFromFramebuffer(FakeIrisXEFramebuffer* fb)
+{
+    fFB = fb;
+    fExeclistFromFB = fb->getExeclist();
+    fRcsRingFromFB  = fb->getRcsRing();
+
+    IOLog("🧩 LINK DEBUG: Exec=%p Ring=%p\n", fExeclistFromFB, fRcsRingFromFB);
+
+    if (!fExeclistFromFB || !fRcsRingFromFB)
+    {
+        IOLog("❌ Accelerator link FAILED — missing RING or EXECLIST\n");
+        return;
+    }
+
+    IOLog("🟢 Accelerator LINK COMPLETE\n");
 }
