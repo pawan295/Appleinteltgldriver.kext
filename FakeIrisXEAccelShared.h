@@ -1,11 +1,30 @@
 #ifndef FAKE_IRIS_XE_ACCEL_SHARED_H
 #define FAKE_IRIS_XE_ACCEL_SHARED_H
 
-#include <stdint.h>
+#include <IOKit/IOService.h>
+
+#include <IOKit/IOTypes.h>     // basic IOKit typedefs
+
+#include <IOKit/IOService.h>
+
+
+enum {
+    kFakeIris_Method_GetCaps                = 0,
+    kFakeIris_Method_CreateContext          = 1,
+    kFakeIris_Method_DestroyContext         = 2,
+    kFakeIris_Method_BindSurfaceUserMapped  = 3,
+    kFakeIris_Method_PresentContext         = 4,
+
+    // New for Phase 8:
+    kFakeIris_Method_SubmitExeclistFenceTest = 5,
+};
+
+#define kFakeIris_Method_SubmitExeclistFenceTest  7
+
+
 
 //
-// ===== ACCEL Selectors =====
-//
+// ===== ACCEL Selec
 enum {
     kAccelSel_Ping = 0,
     kAccelSel_GetCaps = 1,
@@ -165,11 +184,14 @@ static constexpr uint32_t XE_PAGE    = 4096;
 
 static inline uint32_t xe_align(uint32_t v) {
     return (v + 3u) & ~3u;   // 4-byte align
-    
-    
-    
-    
-    
 }
+        
+        
+        
+        
+        
+
+    
+
 
 #endif
