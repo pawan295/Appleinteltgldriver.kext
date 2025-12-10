@@ -6,17 +6,6 @@
 #define super IOUserClient
 OSDefineMetaClassAndStructors(FakeIrisXESharedUserClient, IOUserClient)
 
-// Selectors
-enum {
-    kAccelSel_Ping = 0,
-    kAccelSel_GetCaps = 1
-};
-
-// Tiny capability blob you can extend later
-struct __attribute__((packed)) XEAccelCaps {
-    uint32_t version;      // 1
-    uint32_t metalSupported; // 0/1 (hint only)
-};
 
 bool FakeIrisXESharedUserClient::initWithTask(task_t owningTask, void*, UInt32)
 {
