@@ -2,6 +2,9 @@
 /* #define _FAKE_IRIS_XE_FRAMEBUFFER_HPP_ */
 #pragma once
 
+
+#include <IOKit/acpi/IOACPIPlatformDevice.h>
+
 #include <IOKit/graphics/IOFramebuffer.h>
 #include <IOKit/pci/IOPCIDevice.h> // for IOPCIDevice
 #include <IOKit/IOBufferMemoryDescriptor.h> // for IODeviceMemory
@@ -15,10 +18,24 @@
 // OR (for newer versions)
 #include <os/atomic.h>
 
-extern "C" void OSMemoryBarrier(void);
-#define OSMemoryBarrier() __asm__ volatile("" ::: "memory")
+#include "FakeIrisXEGEM.hpp"
+#include "FakeIrisXEExeclist.hpp"
 
-      
+#include "FakeIrisXERing.h"
+
+#include "FakeIrisXEBacklight.hpp" // include so the compiler sees the type
+
+#include <IOKit/IOLocks.h>
+
+
+
+
+
+
+
+
+
+
 class FakeIrisXEFramebuffer : public IOFramebuffer
 
 {
@@ -26,6 +43,8 @@ class FakeIrisXEFramebuffer : public IOFramebuffer
     
 
 private:
+    
+
     
     IOInterruptEventSource* vsyncSource;
     IOTimerEventSource* vsyncTimer = nullptr;
@@ -65,10 +84,8 @@ private:
       // helpers
       void waitVBlank();       // simple vblank poll
     
-    /*
-    IOBufferMemoryDescriptor* fFBMemoryDescriptor;
+    
     void* fFB;
-    */
     
     
     
@@ -107,21 +124,26 @@ protected:
     IOBufferMemoryDescriptor* cursorMemory;
 
     
-    
-    bool                   initializeHardware();
-     bool                   setupVRAM();
-     bool                   setupDisplayModes();
-     
+         
     IOIndex currentConnection;
       bool displayOnline;
     bool fullyInitialized = false;
     IOLock* powerLock;
     bool shuttingDown = false;
 
+
+    
+    
+    
+    
+    
+ public:
+    
+    
     // Safe MMIO access methods
        uint32_t safeMMIORead(uint32_t offset) {
            if (!mmioBase || offset >= mmioMap->getLength()) {
-               IOLog("⚠️ Invalid MMIO read at 0x%X\n", offset);
+               IOLog("Invalid MMIO read at 0x%X\n", offset);
                return 0xFFFFFFFF;
            }
            return *(volatile uint32_t*)(mmioBase + offset);
@@ -129,7 +151,7 @@ protected:
        
        void safeMMIOWrite(uint32_t offset, uint32_t value) {
            if (!mmioBase || offset >= mmioMap->getLength()) {
-               IOLog("⚠️ Invalid MMIO write at 0x%X\n", offset);
+               IOLog("Invalid MMIO write at 0x%X\n", offset);
                return;
            }
            *(volatile uint32_t*)(mmioBase + offset) = value;
@@ -144,8 +166,6 @@ protected:
     
     
     
-    
- public:
     
     bool fNeedFlush = false;   // <-- REQUIRED (you were missing this)
 
@@ -167,9 +187,8 @@ protected:
     uint32_t getStride() { return 7680; }
 
     
-    IOBufferMemoryDescriptor* framebufferMemory;
     
-    IOBufferMemoryDescriptor* fFramebufferMemory { nullptr };
+    
  
     
      uint64_t getFramebufferPhysAddr() const {
@@ -181,9 +200,7 @@ protected:
     
 //   uint64_t fFBPhys{0};
 
-    IOBufferMemoryDescriptor* getFBMemory() const { return framebufferMemory; }
-   // uint64_t getFramebufferPhysAddr() const { return fFBPhys; }
-
+  
     
     void*    getFramebufferKernelPtr() const; // from IOBufferMemoryDescriptor::getBytesNoCopy()
 
@@ -196,19 +213,16 @@ protected:
     bool   setupWorkLoop();
 
 
-    virtual bool isConsoleDevice() const;
     virtual void           free() override;
-    void notifyServer(IOSelect event);
     virtual void startIOFB();
-    virtual IOWorkLoop* getWorkLoop() const override;
 
+    
+    
     bool controllerEnabled = false;
 
     bool displayPublished = false; // ✅ Member variable
     
     void disableController();
-    
-    void publishDisplay();
     
     
     enum {
@@ -219,9 +233,6 @@ protected:
 
     static IOPMPowerState powerStates[kNumPowerStates];
 
-
-    
-    virtual IOReturn setAbltFramebuffer(void * buffer) ;     // Front-buffer pointer from WS
 
     
     
@@ -239,14 +250,15 @@ protected:
     virtual UInt64 getPixelFormatsForDisplayMode(IODisplayModeID displayMode, IOIndex depth) override;
     virtual IOReturn setDisplayMode(IODisplayModeID displayMode, IOIndex depth) override;
    
-    virtual IOReturn flushFramebuffer(void) ;
  
     
     virtual UInt32 getConnectionCount() override;
     
     virtual IOReturn getStartupDisplayMode(IODisplayModeID *displayMode, IOIndex *depth) override;
     virtual IOReturn getAttributeForConnection(IOIndex connectIndex, IOSelect attribute, uintptr_t *value) override;
-    virtual IODeviceMemory* getVRAMRange() override;
+
+
+
     virtual IOReturn createSharedCursor(IOIndex connectIndex, int version) ;
     virtual IOReturn setBounds(IOIndex index, IOGBounds *bounds) ;
         
@@ -280,16 +292,22 @@ protected:
     virtual IOReturn flushDisplay(void) ;
     
     
-//    virtual void deliverFramebufferNotification(IOIndex index, UInt32 event, void* info);
+    virtual void deliverFramebufferNotification(IOIndex index, UInt32 event, void* info);
 
     
-    virtual IOReturn setNumberOfDisplays(UInt32 count) ;
+     IOReturn setNumberOfDisplays(UInt32 count) ;
     
     
     
-    
-    virtual IODeviceMemory * getApertureRange(IOPixelAperture aperture) override;
+    virtual IODeviceMemory* getApertureRange(IOPixelAperture aperture) APPLE_KEXT_OVERRIDE;
 
+    virtual IOReturn getApertureRange(IOSelect aperture,
+                                      IOPhysicalAddress *phys,
+                                      IOByteCount *length);
+
+    
+    
+    
     
     
     virtual IOIndex getAperture() const ;
@@ -312,59 +330,26 @@ protected:
 
    virtual IOReturn getTimingInfoForDisplayMode(IODisplayModeID mode,
                                                 IOTimingInformation* info)override;
-    
-    virtual IOReturn setCLUTWithEntries(IOColorEntry* colors,
-                                                            UInt32 firstIndex,
-                                                            UInt32 numEntries,
-                                        IOOptionBits options)override;
-        
+
     virtual IOReturn setGammaTable(UInt32 channelCount,
                                                       UInt32 dataCount,
                                                       UInt32 dataWidth,
                                                       void* data)override;
+            
+    
+    
         
-    virtual IOReturn createAccelTask(mach_port_t* port);
-    
-    
-    
-    virtual IOReturn setOnline(bool online);
-    
-    virtual IOReturn getConnectionFlags(IOIndex connectIndex, UInt32* flags);
-    
-    virtual IOReturn notifyServer(IOSelect message, void* data, size_t dataSize);
     
     virtual  IOReturn getGammaTable(UInt32 channelCount,
                                                   UInt32* dataCount,
                                                   UInt32* dataWidth,
                                                          void** data);
 
-    virtual IOReturn setMode(IODisplayModeID displayMode, IOOptionBits options, UInt32 depth);
-
-    
-    virtual IOReturn getOnlineState(IOIndex connectIndex, bool* online);
-    
-    virtual IOReturn setOnlineState(IOIndex connectIndex, bool online);
-    
-  //  void vsyncTimerFired(OSObject* owner, IOTimerEventSource* sender);
-    
-   // void vsyncOccurred(OSObject* owner, IOInterruptEventSource* src, int count);
-    
-
     // Essential methods for IOFramebufferUserClient to function
     virtual IOReturn getAttributeForIndex(IOSelect attribute, UInt32 index, UInt32* value) ;
-    virtual IOReturn setProperties(OSObject* properties) override;
 
-    // Optional but recommended for display control
-    virtual IOReturn validateDetailedTiming(void* desc, UInt32* score) ;
-    virtual IOReturn setDetailedTimings(OSObject* params) ;
-    virtual IOReturn setInterruptState(void* ref, UInt32 state) override;
-    virtual IOReturn handleEvent(IOFramebuffer* fb, void* ref, UInt32 event, void* info) ;
-
-    // Optional: supports brightness, gamma, transform, etc.
-    virtual IOReturn doControl(UInt32 command, void* params, UInt32 size) ;
-    virtual IOReturn extControl(OSObject* params) ;
-    virtual void transformLocation(IOGPoint* loc, IOOptionBits options) ;
-    
+   
+ 
     // in class FakeIrisXEFramebuffer : public IOService / IOFramebuffer...
     IOTimerEventSource* fVBlankTimer = nullptr;
     IOWorkLoop* fWorkLoop = nullptr;   // likely already present
@@ -377,25 +362,27 @@ protected:
     size_t   getFBSize() const { return kernelFBSize; }
     uint64_t getFBPhysAddr() const { return kernelFBPhys; }
 
-    void*    kernelFBPtr   = nullptr;
-        size_t   kernelFBSize  = 0;
-        uint64_t kernelFBPhys  = 0;
+
+
+    FakeIrisXEExeclist* getExeclist() const { return fExeclist; }
+    FakeIrisXERing* getRcsRing() const { return fRcsRing; }
     
     
+    
+    IOBufferMemoryDescriptor* framebufferMemory;
+    void* kernelFBPtr = nullptr;
+    IOPhysicalAddress kernelFBPhys = 0;
+    IOByteCount kernelFBSize = 0;
+    IOMemoryMap* framebufferMap = nullptr;
+
+    bool initGuCSystem();
+
     
     IOReturn performFlushNow();
     static IOReturn staticPerformFlush(OSObject *owner,
                                        void *arg0, void *arg1,
                                        void *arg2, void *arg3);
 
-    
-    
-
-    IOReturn newUserClient(task_t owningTask,
-                                                  void* securityID,
-                                                  UInt32 type,
-                                                  OSDictionary* properties,
-                                                  IOUserClient **handler)override;
     
     bool makeUsable();
     
@@ -409,32 +396,163 @@ protected:
     
 
     uint32_t fbGGTTOffset = 0x00000800;
-    
-    bool open(IOService* client, IOOptionBits opts);
-
-    void close(IOService* client, IOOptionBits opts)override;
-
-    IOReturn handleGetAttribute(
-                                                       IOIndex connect, IOSelect attribute, uintptr_t* value);
 
     
-    bool fIsOpen;
+ virtual   IOReturn getNotificationSemaphore(IOSelect event,semaphore **sem)override;
+    
+   virtual IOReturn setCLUTWithEntries(IOColorEntry *entries, SInt32 index,
+ SInt32 numEntries, IOOptionBits options);
+  
+    
+    IOReturn setBackingStoreState(IODisplayModeID mode, IOOptionBits options);
+    
+    IOReturn setStartupDisplayMode(IODisplayModeID mode, IOIndex depth)override;
+    
+    
+    
+   virtual IOReturn newUserClient(task_t owningTask,
+                                                  void* securityID,
+                                                  UInt32 type,
+                                                  OSDictionary* properties,
+                                                  IOUserClient **handler)override;
+    
+    
+    IOReturn waitForAcknowledge(IOIndex connect, UInt32 type, void *info);
+    
+    
+    bool gpuPowerOn();
 
-    virtual IOIndex getStartupDepth(void) ;
+    
+    bool waitForExeclistEvent(uint32_t timeoutMs);
+    void* fSleepToken = (void*)0x12345678; // any unique pointer
+    FakeIrisXERing* fRcsRing;   // render ring
+    FakeIrisXEGEM* createTinyBatchGem();
+
+    
+    // GGTT mapping area (aperture)
+    volatile uint32_t* fGGTT = nullptr;
+    uint64_t fGGTTSize = 0;       // bytes
+    uint64_t fGGTTBaseGPU = 0;    // start VA
+
+    // Simple bump allocator state
+    uint64_t fNextGGTTOffset = 0;
+
+    
+ 
+    uint64_t ggttMap(FakeIrisXEGEM* gem);
+    void ggttUnmap(uint64_t gpuAddr, uint32_t pages);
+
+    // ===========================
+    // RCS Ring + GGTT + BAR0
+    // ===========================
+    volatile uint32_t* fBar0 = nullptr;       // MMIO BAR0 virtual mapping
+    FakeIrisXERing*    fRingRCS = nullptr;    // Render Command Streamer ring
+
+    uint64_t fGGTTBase = 0;                   // Base GGTT physical address
+    uint32_t fGTTMMIOOffset = 0;              // from config space
+
+    // Temporary batch GEM for testing
+    FakeIrisXEGEM* batchGem = nullptr;
+
+    FakeIrisXEGEM*    fFenceGEM = nullptr;
+    uint64_t          fRingGpuVA = 0;             // GPU VA of ring buffer (GGTT)
+    size_t            fRingSize = 0;              // bytes
+    uint32_t fFenceSeq;
+    FakeIrisXEGEM* fRingGem = nullptr;  // <--- Add this
+
+    
+    
+
+    
+    FakeIrisXERing* createRcsRing(size_t bytes);
+
+    uint32_t submitBatch(FakeIrisXEGEM* batchGem, size_t batchOffsetBytes, size_t batchSizeBytes);
     
     
     
     
+    uint32_t appendFenceAndSubmit(FakeIrisXEGEM* userBatchGem, size_t userBatchOffsetBytes, size_t userBatchSizeBytes);
+   
+    void handleInterrupt(IOInterruptEventSource* src, int count);
+    bool addPendingSubmission(uint32_t seq, FakeIrisXEGEM* master, FakeIrisXEGEM* tail);
+    bool completePendingSubmission(uint32_t seq);
+    void cleanupAllPendingSubmissions();
+
+    bool setBacklightPercent(uint32_t percent);
     
+    uint32_t getBacklightPercent();
+
+    void initBacklightHardware();
+
+    FakeIrisXEGEM* createSimpleUserBatch();
     
-private:
+    void dumpIRQAndRingRegsSafe();
+    
+    void enableRcsInterruptsSafely();
+
+    
+        bool forcewakeRenderHold(uint32_t timeoutMs = 2000);   // request & wait for FW ack
+        void forcewakeRenderRelease();                         // drop FW
+        void ensureEngineInterrupts();                         // minimal IER for engine
+   
+    FakeIrisXEExeclist* fExeclist = nullptr;
+
+    
+   
+protected:
    
     void* gttVa = nullptr;
      IOVirtualAddress gttVA = 0;
      volatile uint64_t* ggttMMIO = nullptr;
+    IOBufferMemoryDescriptor* textureMemory;
+    size_t textureMemorySize;
+
+    
+    
+    
+    static void handleInterruptTrampoline(OSObject *owner, IOInterruptEventSource *src, int count) {
+        FakeIrisXEFramebuffer *self = OSDynamicCast(FakeIrisXEFramebuffer, owner);
+        if (!self) return;
+        self->handleInterrupt(src, count);
+    }
+
+    
+    
+
+private:
+    IOInterruptEventSource* fInterruptSource = nullptr;
+
+    // simple struct to keep pending submissions if you want cleanup:
+    struct Submission {
+        uint32_t seq;
+        FakeIrisXEGEM* masterGem;
+        FakeIrisXEGEM* tailGem;
+        // add timestamp, owner, etc.
+    };
+    OSArray* fPendingSubmissions = nullptr; // array of Submission objects or custom wrapper
+    IOLock* fPendingLock = nullptr;
+
+    IOCommandGate*  fCmdGate          = nullptr;
+   
+    FakeIrisXEBacklight* fBacklight = nullptr;
+    
+    
+    
+    
+    // Firmware data storage
+     
+      bool fGuCEnabled;
+      
+      // GuC manager instance (if you create one)
+      class FakeIrisXEGuC* fGuC;
     
 
 
 };
+
+
+
+
+
 
 /* #endif  _FAKE_IRIS_XE_FRAMEBUFFER_HPP_ */
