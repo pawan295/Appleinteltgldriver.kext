@@ -4,10 +4,10 @@ Intel Tiger Lake (Gen12) Graphics Driver for macOS
 
 ## Overview
 
-This is a graphics driver for Intel Tiger Lake (Gen12) integrated GPUs, designed for macOS. 
+This is a graphics driver for Intel Tiger Lake (Gen12) integrated GPU's, designed for macOS. 
 
-##Current Limitations
-Currently it only opens accelrator user clients for surface and display releted, no command sumbission and metal.
+## Current Limitations
+Currently it only opens accelerator user clients for surface and display related, no command submission and metal.
 Need support from experts......
 
 
