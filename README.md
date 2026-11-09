@@ -2,6 +2,9 @@
 
 Intel Tiger Lake (Gen12) Graphics Driver for macOS
 
+Project The projects have been shut down. See Whateverxe for Tiger lake accelration.
+https://github.com/b00t0x/WhateverXe
+
 ## Overview
 
 This is a graphics driver for Intel Tiger Lake (Gen12) integrated GPU's, designed for macOS. 
